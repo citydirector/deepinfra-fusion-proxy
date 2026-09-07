@@ -1,0 +1,33 @@
+{
+  "name": "deepinfra-fusion-proxy",
+  "version": "1.0.0",
+  "description": "Dependency-free local reverse proxy for the DeepInfra API: injects service_tier/fail_fast and auto-falls back between Standard and Flex with per-session cooldown locks.",
+  "type": "commonjs",
+  "main": "server.js",
+  "bin": {
+    "deepinfra-fusion-proxy": "server.js"
+  },
+  "files": [
+    "server.js",
+    "test-mock-upstream.js",
+    "test/run-wait-test.js"
+  ],
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/run-wait-test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "deepinfra",
+    "proxy",
+    "openai",
+    "flex",
+    "priority",
+    "service-tier",
+    "fallback",
+    "llm"
+  ],
+  "license": "MIT"
+}

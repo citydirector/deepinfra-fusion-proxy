@@ -1,0 +1,11 @@
+# Runtime state (auto-created with defaults on first boot; holds per-session ids)
+config.json
+locks.json
+
+# Logs / scratch
+*.log
+*.tmp
+.DS_Store
+
+# Node
+node_modules/
