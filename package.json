@@ -1,16 +1,12 @@
 {
   "name": "deepinfra-fusion-proxy",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Dependency-free local reverse proxy for the DeepInfra API (injects service_tier/fail_fast, auto-falls back between Standard and Flex with per-session cooldown locks) — shipped as a DSH profile bundle with its composer toggle card.",
   "type": "commonjs",
   "main": "server.js",
-  "bin": {
-    "deepinfra-fusion-proxy": "server.js"
-  },
   "exports": {
     ".": "./server.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./server.js": "./server.js",
     "./package.json": "./package.json"
   },
   "dsh": {

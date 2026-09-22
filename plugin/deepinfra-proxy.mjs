@@ -80,9 +80,12 @@ export function apply(ctx) {
 
   function spawnChild(s) {
     if (child !== undefined || disposed) return;
-    const serverFile = s.serverPath || path.join(s.stateDir, "server.js");
-    if (!existsSync(serverFile)) {
-      log(`server.js not found at ${serverFile}`);
+    // No hidden fallback to <stateDir>/server.js: that used to resurrect the old
+    // hand-placed data\deepinfra-proxy copy whenever an override was empty, and
+    // it made "which core is actually running" unreadable off the process list.
+    const serverFile = s.serverPath;
+    if (typeof serverFile !== "string" || serverFile.length === 0 || !existsSync(serverFile)) {
+      log(`server.js missing: serverPath=${JSON.stringify(serverFile)}`);
       scheduleRestart();
       return;
     }

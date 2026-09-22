@@ -6,7 +6,8 @@
 # 自身的 config.json 持有，在会话输入区的 DeepInfra 卡片里改，不在这里写。
 #
 # stateDir 默认 = $DSH_HOME/deepinfra-proxy；serverPath 默认 = bundle 内的
-# server.js（随 pnpm 安装一起落地），通常都不必填。
+# server.js（随 pnpm 安装一起落地），通常都不必填——这两个键刻意不给绝对路径
+# 示例，免得后来人把机器路径再写回配置里。
 
 deepinfra-proxy:
   enabled: true
@@ -14,7 +15,6 @@ deepinfra-proxy:
   port: 8790
   # 上游 DeepInfra OpenAI 兼容入口
   upstream: https://api.deepinfra.com/v1/openai
-  # 运行时状态目录（config.json / locks.json）；留空用默认
-  # stateDir: 'D:\dsh-portable\data\deepinfra-proxy'
-  # 代理内核路径；留空用 bundle 内的 server.js
-  # serverPath: 'D:\dsh-portable\data\profiles\web\node_modules\deepinfra-fusion-proxy\server.js'
+  # 只有确实要换位置时才取消注释：
+  # stateDir: <运行时状态目录>   # config.json / locks.json 的落点
+  # serverPath: <代理内核 server.js 的路径>

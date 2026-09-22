@@ -41,7 +41,6 @@ window.__ModuleLoader__.load({
       label2: "var(--dsw-alias-label-secondary)",
       label3: "var(--dsw-alias-label-tertiary)", // runtime-exists (shipped uses it)
       hover: "var(--dsw-alias-interactive-bg-hover)", // runtime-exists (shipped uses it)
-      brand: "var(--dsw-alias-brand-primary)",
       error: "var(--dsw-alias-state-error-primary)",
       flex: "#d98c1f", // amber accent for the flex (cheaper / less stable) state
     };

@@ -262,7 +262,7 @@ function handleControl(req, res, url) {
   if (req.method === 'POST' && (url.pathname === CONTROL_PREFIX + '/config' || url.pathname === CONTROL_PREFIX + '/unlock')) {
     readBody(req).then((buf) => {
       let b = {};
-      try { b = JSON.parse(buf.toString('utf8') || '{}'); } catch (e) { return sendJson(res, 400, { error: 'bad json' }); }
+      try { b = JSON.parse(buf.toString('utf8') || '{}'); } catch { return sendJson(res, 400, { error: 'bad json' }); }
       if (url.pathname === CONTROL_PREFIX + '/config') {
         const c = readJson(CONFIG_FILE, {});
         if (b.defaultMode !== undefined) c.defaultMode = normMode(b.defaultMode);
@@ -301,7 +301,7 @@ function handleControl(req, res, url) {
 
 async function injectAndForward(req, res, url) {
   let body;
-  try { body = JSON.parse((await readBody(req)).toString('utf8')); } catch (e) { return sendJson(res, 400, { error: 'bad json' }); }
+  try { body = JSON.parse((await readBody(req)).toString('utf8')); } catch { return sendJson(res, 400, { error: 'bad json' }); }
   const key = keyOf(body);
   const cfg = loadConfig();
 
@@ -326,7 +326,7 @@ async function injectAndForward(req, res, url) {
     // try flex again):
     //   'stay'     -> persist sessions[key] = standard (user manually returns to flex)
     //   'cooldown' -> arm the cooling lock; auto-return to flex when it expires
-    try { attempt.stream.resume(); } catch (e) {}
+    try { attempt.stream.resume(); } catch { /* already flowing */ }
     attempt = await forwardPost(req.headers, url.pathname, url.search, Buffer.from(JSON.stringify(bodyForMode(body, 'standard', wait))));
     const act = loadConfig().fallbackAction;
     if (act === 'cooldown') {
@@ -349,7 +349,7 @@ const server = http.createServer((req, res) => {
   const isChat = req.method === 'POST' && url.pathname.endsWith('/chat/completions');
   if (isChat) {
     injectAndForward(req, res, url).catch((e) => {
-      try { sendJson(res, 502, { error: 'upstream unavailable: ' + e.message }); } catch (err) {}
+      try { sendJson(res, 502, { error: 'upstream unavailable: ' + e.message }); } catch { /* headers already sent */ }
     });
     return;
   }

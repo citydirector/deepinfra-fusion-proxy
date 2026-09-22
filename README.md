@@ -30,7 +30,7 @@ Most clients have no way to send these top-level fields, and switching between t
 - **Automatic fallback** — a `429` on a Flex attempt retries once as Standard, then either stays on Standard (`fallbackAction: "stay"`) or arms a per-session cooldown lock (`fallbackAction: "cooldown"`) that auto-returns to Flex after N rounds.
 - **Wait policy** — per session, choose **fail-fast** (`fail_fast: true`, busy → immediate 429 → fallback) or **wait** (`fail_fast: false`, busy → queue up to the provider cap, ~10 minutes on DeepInfra).
 - **Control API** — JSON endpoints for state, config, and unlocking cooldown locks, so a GUI or script can drive it live without a restart.
-- **Zero dependencies** — pure Node stdlib (`http`/`https`/`fs`/`path`). No install step.
+- **Zero dependencies in the core** — pure Node stdlib (`http`/`https`/`fs`/`path`), so `server.js` runs straight from a checkout with nothing to install. (The DSH host plugin beside it imports the harness' own `@deepseek-ai/schemastery`, declared as a dependency so a bundle install resolves it.)
 
 ### How it works
 
@@ -59,17 +59,12 @@ OpenAI-compatible client (baseURL → http://127.0.0.1:8790/v1/openai)
 ```bash
 git clone https://github.com/citydirector/deepinfra-fusion-proxy.git
 cd deepinfra-fusion-proxy
-npm install   # no runtime deps; only needed if you want the `bin` link
-npm start     # or: node server.js
+node server.js     # no install step: the core has no dependencies
+# or: npm start    # same thing, spelled through package.json
 ```
 
-Or run it directly without any install:
-
-```bash
-DEEPINFRA_API_KEY=... node server.js
-```
-
-Environment variables:
+Every knob is an optional environment variable (`DF_PROXY_PORT` defaults to
+`8790`, the upstream to DeepInfra's official base):
 
 | Env | Default | Meaning |
 |---|---|---|
@@ -209,7 +204,7 @@ DeepInfra 会给部分模型标注服务档位（参考 [Chat Completions 概览
 - **自动回退** — Flex 尝试遇到 `429` 后，以 Standard 重试一次，然后要么停在 Standard（`fallbackAction: "stay"`），要么挂上按会话的冷却锁（`fallbackAction: "cooldown"`），N 轮后自动回到 Flex。
 - **等待策略** — 按会话选择 **立即失败**（`fail_fast: true`，忙时立刻 429 → 回退）或 **排队等待**（`fail_fast: false`，忙时入队，DeepInfra 上限约 10 分钟）。
 - **控制 API** — 提供状态 / 配置 / 解锁冷却锁的 JSON 端点，GUI 或脚本可免重启实时驱动。
-- **零依赖** — 仅用 Node 标准库（`http`/`https`/`fs`/`path`），无需安装步骤。
+- **内核零依赖** — 仅用 Node 标准库（`http`/`https`/`fs`/`path`），`server.js` 从检出目录直接就能跑、无需安装。（它旁边的 DSH 宿主插件会 import 宿主自带的 `@deepseek-ai/schemastery`，已声明为依赖，bundle 安装时由 pnpm 解析。）
 
 ### 工作原理
 
@@ -238,17 +233,11 @@ OpenAI 兼容客户端（baseURL → http://127.0.0.1:8790/v1/openai）
 ```bash
 git clone https://github.com/citydirector/deepinfra-fusion-proxy.git
 cd deepinfra-fusion-proxy
-npm install   # 无运行时依赖；仅在需要 `bin` 链接时才需要
-npm start     # 或：node server.js
+node server.js     # 无需安装：内核没有任何依赖
+# 或：npm start     # 同一件事，走 package.json
 ```
 
-也可以完全不安装直接运行：
-
-```bash
-DEEPINFRA_API_KEY=... node server.js
-```
-
-环境变量：
+所有旋钮都是可选的环境变量（`DF_PROXY_PORT` 默认 `8790`，上游默认为 DeepInfra 官方地址）：
 
 | 环境变量 | 默认值 | 含义 |
 |---|---|---|

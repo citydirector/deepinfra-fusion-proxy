@@ -90,6 +90,7 @@ const plugin = read("plugin/deepinfra-proxy.mjs");
 check("plugin resolves its server.js from its own location", plugin.includes('fileURLToPath(import.meta.url)') && plugin.includes('".."'));
 check("plugin keeps no absolute D:\\ install path", !/["']D:\\\\/.test(plugin));
 check("plugin defaults the state dir under $DSH_HOME", plugin.includes("process.env.DSH_HOME"));
+check("plugin has no hidden <stateDir>/server.js fallback", !plugin.includes('path.join(s.stateDir, "server.js")'));
 check("plugin registers the settings namespace", plugin.includes('ctx.settings.register("deepinfra-proxy"'));
 check("plugin needs schemastery", plugin.includes('from "@deepseek-ai/schemastery"'));
 
