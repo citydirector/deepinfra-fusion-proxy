@@ -22,7 +22,7 @@
  * endpoints (typically reached through a reverse-proxy bridge so a browser
  * UI can drive them on the same origin).
  *
- * Control (HTTP, under /__proxy/):
+ * Control (HTTP, under $DF_PROXY_CONTROL_PREFIX, default /__proxy/):
  *   GET  /__proxy/state           -> full state (for a GUI)
  *   POST /__proxy/config          -> update defaultMode / coolLockRounds /
  *                                    sessions / fallbackAction / defaultWait /
@@ -48,6 +48,9 @@ const PORT = parseInt(process.env.DF_PROXY_PORT || '8790', 10);
 const UPSTREAM = process.env.DF_PROXY_UPSTREAM || 'https://api.deepinfra.com/v1/openai';
 const BASE_PATH = process.env.DF_PROXY_BASE_PATH || '/v1/openai';
 const STATE_DIR = process.env.DF_PROXY_STATE_DIR || __dirname;
+// Control-API prefix. The DSH bundle's host plugin points its /__dfusion/
+// browser bridge at this prefix, so both sides read one value here.
+const CONTROL_PREFIX = process.env.DF_PROXY_CONTROL_PREFIX || '/__proxy';
 
 const CONFIG_FILE = path.join(STATE_DIR, 'config.json');
 const LOCKS_FILE = path.join(STATE_DIR, 'locks.json');
@@ -244,7 +247,7 @@ function sendJson(res, code, obj) {
 }
 
 function handleControl(req, res, url) {
-  if (req.method === 'GET' && url.pathname === '/__proxy/state') {
+  if (req.method === 'GET' && url.pathname === CONTROL_PREFIX + '/state') {
     const cfg = loadConfig();
     return sendJson(res, 200, {
       defaultMode: cfg.defaultMode,
@@ -256,11 +259,11 @@ function handleControl(req, res, url) {
       waitModes: cfg.waitModes,
     });
   }
-  if (req.method === 'POST' && (url.pathname === '/__proxy/config' || url.pathname === '/__proxy/unlock')) {
+  if (req.method === 'POST' && (url.pathname === CONTROL_PREFIX + '/config' || url.pathname === CONTROL_PREFIX + '/unlock')) {
     readBody(req).then((buf) => {
       let b = {};
       try { b = JSON.parse(buf.toString('utf8') || '{}'); } catch (e) { return sendJson(res, 400, { error: 'bad json' }); }
-      if (url.pathname === '/__proxy/config') {
+      if (url.pathname === CONTROL_PREFIX + '/config') {
         const c = readJson(CONFIG_FILE, {});
         if (b.defaultMode !== undefined) c.defaultMode = normMode(b.defaultMode);
         if (b.coolLockRounds !== undefined) c.coolLockRounds = clampInt(b.coolLockRounds, 0, 99, c.coolLockRounds || 4);
@@ -342,7 +345,7 @@ async function injectAndForward(req, res, url) {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
-  if (url.pathname.startsWith('/__proxy/')) return handleControl(req, res, url);
+  if (url.pathname.startsWith(CONTROL_PREFIX + '/')) return handleControl(req, res, url);
   const isChat = req.method === 'POST' && url.pathname.endsWith('/chat/completions');
   if (isChat) {
     injectAndForward(req, res, url).catch((e) => {

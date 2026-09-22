@@ -1,20 +1,38 @@
 {
   "name": "deepinfra-fusion-proxy",
-  "version": "1.0.0",
-  "description": "Dependency-free local reverse proxy for the DeepInfra API: injects service_tier/fail_fast and auto-falls back between Standard and Flex with per-session cooldown locks.",
+  "version": "1.1.0",
+  "description": "Dependency-free local reverse proxy for the DeepInfra API (injects service_tier/fail_fast, auto-falls back between Standard and Flex with per-session cooldown locks) — shipped as a DSH profile bundle with its composer toggle card.",
   "type": "commonjs",
   "main": "server.js",
   "bin": {
     "deepinfra-fusion-proxy": "server.js"
   },
+  "exports": {
+    ".": "./server.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./server.js": "./server.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "files": [
     "server.js",
+    "cordis.patch.yml",
+    "plugin",
+    "ui",
+    "config",
     "test-mock-upstream.js",
-    "test/run-wait-test.js"
+    "test/run-wait-test.js",
+    "test/bundle-layout-test.mjs",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "start": "node server.js",
-    "test": "node test/run-wait-test.js"
+    "test": "node test/run-wait-test.js && node test/bundle-layout-test.mjs"
   },
   "engines": {
     "node": ">=18"
@@ -27,7 +45,12 @@
     "priority",
     "service-tier",
     "fallback",
-    "llm"
+    "llm",
+    "dsh",
+    "dsh-bundle"
   ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
   "license": "MIT"
 }

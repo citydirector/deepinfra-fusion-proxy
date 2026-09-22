@@ -2,9 +2,9 @@
 
 > **English** · [**简体中文**](#简体中文)
 
-A dependency-free local reverse proxy for the [DeepInfra](https://deepinfra.com) API that turns the service-tier knobs into first-class switches and adds automatic `Standard ↔ Flex` fallback with per-session cooldown locks.
+A dependency-free local reverse proxy for the [DeepInfra](https://deepinfra.com) API that turns the service-tier knobs into first-class switches and adds automatic `Standard ↔ Flex` fallback with per-session cooldown locks. It also ships as a **DSH (DeepSeek Harness) profile bundle**, so a DSH install can add the proxy *and* its per-session toggle card straight from this repository URL.
 
-一个零依赖的 [DeepInfra](https://deepinfra.com) API 本地反向代理：把服务档位（service tier）参数变成开箱即用的开关，并实现自动 `Standard ↔ Flex` 回退与按会话的冷却锁。
+一个零依赖的 [DeepInfra](https://deepinfra.com) API 本地反向代理：把服务档位（service tier）参数变成开箱即用的开关，并实现自动 `Standard ↔ Flex` 回退与按会话的冷却锁。同时以 **DSH（DeepSeek Harness）profile bundle** 形式发布，DSH 可直接从本仓库 URL 一次装好代理与它的按会话切换卡片。
 
 ---
 
@@ -77,8 +77,36 @@ Environment variables:
 | `DF_PROXY_UPSTREAM` | `https://api.deepinfra.com/v1/openai` | Upstream base URL. |
 | `DF_PROXY_BASE_PATH` | `/v1/openai` | Path prefix to strip before mapping onto the upstream. |
 | `DF_PROXY_STATE_DIR` | script directory | Where `config.json` / `locks.json` live. |
+| `DF_PROXY_CONTROL_PREFIX` | `/__proxy` | Prefix the control endpoints answer on (the DSH bundle's host plugin points its `/__dfusion/` browser bridge here). |
 
 Point your client at `http://127.0.0.1:8790/v1/openai` and keep sending the normal DeepInfra `Authorization` header — the proxy relays it verbatim.
+
+### DSH profile bundle
+
+This repository **is** a bundle package (`dsh.bundle.patch`), so a DSH profile can install it from the GitHub URL — the Plugins panel resolves the patch, adds the bundle to the profile's layer stack, and pnpm lands `server.js`, the host plugin and the toggle card together.
+
+```
+# Plugins panel → install → URL
+https://github.com/citydirector/deepinfra-fusion-proxy
+
+# or, from the CLI
+dsh plugin --profile web add github:citydirector/deepinfra-fusion-proxy
+```
+
+What the bundle inserts (`cordis.patch.yml`, two id-addressed rows — a user-layer row with the same id overrides either one):
+
+```yaml
+- insert:
+    - id: deepinfra-proxy
+      name: ./plugin/deepinfra-proxy.mjs    # host half: supervises server.js, bridges /__dfusion/
+    - id: deepinfra-proxy-ui
+      name: ./ui/lib/index.js               # card host half; browser half = ui exports["./client"]
+```
+
+- **Host plugin** — starts/stops the proxy core with DSH, restarts it with backoff, releases the port on unload, and registers the same-origin `/__dfusion/*` → `/__proxy/*` bridge the card talks through.
+- **Toggle card** — a chip in the composer tool row (`conversation.input.right`) with a popover for Standard/Flex, wait policy, cooldown rounds and fallback behaviour. It drives the proxy's own `config.json`, so it survives a DSH restart and needs no shipped-code change.
+- **Layout** — everything is bundle-relative: the core is `<bundle>/server.js`, the state dir defaults to `$DSH_HOME/deepinfra-proxy` (`config.json` / `locks.json`), and both are overridable through the `deepinfra-proxy` settings namespace (see `config/settings.example.yaml`).
+- **Point a route at it** — e.g. an `openai-completions` provider with `baseURL: http://127.0.0.1:8790/v1/openai` and `cacheRetention: long` (that is what supplies the per-session `prompt_cache_key`).
 
 ### Configuration
 
@@ -102,7 +130,7 @@ State lives in `config.json` (auto-created with defaults on first boot):
 
 ### Control API
 
-All under `/__proxy/`:
+All under `/__proxy/` (change the prefix with `DF_PROXY_CONTROL_PREFIX`):
 
 | Endpoint | Description |
 |---|---|
@@ -131,7 +159,7 @@ The per-session key is the request body's `prompt_cache_key`. OpenAI-compatible 
 ### Testing
 
 ```bash
-npm test    # or: node test/run-wait-test.js
+npm test    # or: node test/run-wait-test.js && node test/bundle-layout-test.mjs
 ```
 
 The test spins up the bundled mock upstream (`test-mock-upstream.js`, echoes the received body, can force 429) and a proxy instance on throwaway ports with a throwaway state dir, then asserts:
@@ -144,6 +172,8 @@ The test spins up the bundled mock upstream (`test-mock-upstream.js`, echoes the
 - `defaultWait` / `waitModes` round-trip through the control API
 
 The mock writes its debug scratch to the OS temp dir, and the test self-cleans its throwaway state — the checkout stays pristine.
+
+`test/bundle-layout-test.mjs` is the packaging guard (no DSH, no network, no ports): it asserts the manifest declares `dsh.bundle.patch`, every patch row resolves to a file the `files` list actually ships, the `ui/` package is a well-formed dual-face client package, and the plugin anchors on bundle-relative paths with no machine-specific absolute path baked in.
 
 ### Security notes
 
@@ -226,8 +256,36 @@ DEEPINFRA_API_KEY=... node server.js
 | `DF_PROXY_UPSTREAM` | `https://api.deepinfra.com/v1/openai` | 上游基地址。 |
 | `DF_PROXY_BASE_PATH` | `/v1/openai` | 映射到上游前要剥掉的路径前缀。 |
 | `DF_PROXY_STATE_DIR` | 脚本所在目录 | `config.json` / `locks.json` 存放位置。 |
+| `DF_PROXY_CONTROL_PREFIX` | `/__proxy` | 控制端点响应的前缀（DSH bundle 的宿主插件把 `/__dfusion/` 浏览器桥接到这里）。 |
 
 把你的客户端指向 `http://127.0.0.1:8790/v1/openai`，继续照常发送 DeepInfra 的 `Authorization` 头——代理会原样透传。
+
+### DSH profile bundle（远程安装）
+
+本仓库**本身就是**一个 bundle 包（含 `dsh.bundle.patch`），所以 DSH profile 可以直接从 GitHub URL 安装：插件页解析补丁、把该 bundle 加入 profile 的层栈，pnpm 一次性落地 `server.js`、宿主插件与切换卡片。
+
+```
+# 插件页 → 安装 → URL
+https://github.com/citydirector/deepinfra-fusion-proxy
+
+# 或用 CLI
+dsh plugin --profile web add github:citydirector/deepinfra-fusion-proxy
+```
+
+bundle 插入的内容（`cordis.patch.yml`，两行按 id 定位——用户层写同一 id 即可覆盖任一行）：
+
+```yaml
+- insert:
+    - id: deepinfra-proxy
+      name: ./plugin/deepinfra-proxy.mjs    # 宿主半边：托管 server.js、桥接 /__dfusion/
+    - id: deepinfra-proxy-ui
+      name: ./ui/lib/index.js               # 卡片宿主半边；浏览器半边 = ui 的 exports["./client"]
+```
+
+- **宿主插件** — 随 DSH 启停代理内核、异常退出按退避重启、卸载时释放端口，并注册卡片所用的同源 `/__dfusion/*` → `/__proxy/*` 桥接。
+- **切换卡片** — 会话输入区工具行（`conversation.input.right`）的 chip，弹出面板可切 Standard/Flex、等待策略、冷却轮数与 429 回退方式。它驱动代理自身的 `config.json`，重启 DSH 仍保留，且不需要改任何随包发布的代码。
+- **目录约定** — 全部相对 bundle：内核是 `<bundle>/server.js`，状态目录默认 `$DSH_HOME/deepinfra-proxy`（`config.json` / `locks.json`），二者都可在 `deepinfra-proxy` settings 命名空间里覆盖（见 `config/settings.example.yaml`）。
+- **把路由指过来** — 例如一个 `openai-completions` provider，`baseURL: http://127.0.0.1:8790/v1/openai` 且 `cacheRetention: long`（按会话的 `prompt_cache_key` 正是由此而来）。
 
 ### 配置
 
@@ -251,7 +309,7 @@ DEEPINFRA_API_KEY=... node server.js
 
 ### 控制 API
 
-全部位于 `/__proxy/` 下：
+全部位于 `/__proxy/` 下（可用 `DF_PROXY_CONTROL_PREFIX` 改前缀）：
 
 | 端点 | 说明 |
 |---|---|
@@ -280,7 +338,7 @@ curl http://127.0.0.1:8790/__proxy/state
 ### 测试
 
 ```bash
-npm test    # 或：node test/run-wait-test.js
+npm test    # 或：node test/run-wait-test.js && node test/bundle-layout-test.mjs
 ```
 
 测试会拉起仓库自带的 mock 上游（`test-mock-upstream.js`，回显收到的请求体、可强制 429）和一个使用一次性端口/状态目录的代理实例，然后断言：
@@ -293,6 +351,8 @@ npm test    # 或：node test/run-wait-test.js
 - `defaultWait` / `waitModes` 经控制 API 往返一致
 
 mock 把调试残留写到系统临时目录，测试运行后自清理临时状态——检出目录始终保持整洁。
+
+`test/bundle-layout-test.mjs` 是打包形态的守卫（不依赖 DSH、不联网、不占端口）：断言清单声明了 `dsh.bundle.patch`、每条补丁行都指向 `files` 确实会打包的文件、`ui/` 是合规的双面客户端包，且宿主插件只依赖 bundle 相对路径、没有写死机器绝对路径。
 
 ### 安全说明
 

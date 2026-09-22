@@ -1,0 +1,20 @@
+# deepinfra-fusion-proxy — settings template (脱敏示例，勿直接使用其中的占位值)
+#
+# 装入 DSH 的 profile bundle 后，连接参数来自 data\settings.yaml 的
+# `deepinfra-proxy:` 段；不写就是下面这些默认值。
+# 运行时模式（defaultMode / 每会话 Standard-Flex / 冷却锁 / 等待策略）由代理
+# 自身的 config.json 持有，在会话输入区的 DeepInfra 卡片里改，不在这里写。
+#
+# stateDir 默认 = $DSH_HOME/deepinfra-proxy；serverPath 默认 = bundle 内的
+# server.js（随 pnpm 安装一起落地），通常都不必填。
+
+deepinfra-proxy:
+  enabled: true
+  # 代理监听端口（llm 路由 baseURL 指到这里，默认 http://127.0.0.1:8790/v1/openai）
+  port: 8790
+  # 上游 DeepInfra OpenAI 兼容入口
+  upstream: https://api.deepinfra.com/v1/openai
+  # 运行时状态目录（config.json / locks.json）；留空用默认
+  # stateDir: 'D:\dsh-portable\data\deepinfra-proxy'
+  # 代理内核路径；留空用 bundle 内的 server.js
+  # serverPath: 'D:\dsh-portable\data\profiles\web\node_modules\deepinfra-fusion-proxy\server.js'

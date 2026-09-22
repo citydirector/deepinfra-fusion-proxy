@@ -1,0 +1,15 @@
+# The deepinfra-fusion-proxy profile bundle patch: two inserts over the profile
+# root. Rows are addressed by id, so a later bundle layer or the user's own
+# profile cordis.patch.yml can override either one (the last write wins per row).
+#
+# `./` module names resolve inside this bundle package, so the same patch works
+# for a pnpm install from a git URL and for a copy dropped into the profile by
+# hand. The UI row is the `ui/` package's host half (an empty apply, so the host
+# Loader rosters it); its browser half is the package's exports["./client"],
+# picked up by the client-module scan and injected into the composer's tool row.
+
+- insert:
+    - id: deepinfra-proxy
+      name: ./plugin/deepinfra-proxy.mjs
+    - id: deepinfra-proxy-ui
+      name: ./ui/lib/index.js
