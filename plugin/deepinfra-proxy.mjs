@@ -31,7 +31,7 @@
  * imports and the configuration page keys off `<package>#<row id>`.
  */
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
@@ -47,9 +47,10 @@ export const name = "deepinfra-proxy";
 
 /**
  * No required services. The configuration is this plugin's own Config, the
- * bridge is looked up through `ctx.get('webServer')`, and the settings service
- * is only asked for a page policy — all three optional, so the proxy still runs
- * (and still serves the LLM route) in a deployment that composes none of them.
+ * bridge waits for the `webServer` service through `ctx.inject`, and the
+ * settings service is only asked for a page policy — all three optional, so the
+ * proxy still runs (and still serves the LLM route) in a deployment that
+ * composes none of them.
  */
 export const inject = [];
 
@@ -100,7 +101,6 @@ export function apply(ctx, config) {
   let child = undefined;
   let restartTimer = undefined;
   let restartCount = 0;
-  let bridgeOff = undefined;
   let disposed = false;
 
   // Serialize the stop/spawn cycles so rapid volatile commits cannot interleave.
@@ -142,6 +142,18 @@ export function apply(ctx, config) {
       scheduleRestart();
       return;
     }
+    // spawn() below passes cwd = stateDir, and a nonexistent cwd makes spawn
+    // fail with ENOENT *named after the executable* ("spawn <node> ENOENT") —
+    // before server.js ever runs, and server.js is what creates this dir
+    // (writeJson mkdirs it). Create it here first, or a profile whose state
+    // dir is absent crash-loops on every boot.
+    try {
+      mkdirSync(s.stateDir, { recursive: true });
+    } catch (e) {
+      log(`stateDir unusable: ${JSON.stringify(s.stateDir)} (${e.message})`);
+      scheduleRestart();
+      return;
+    }
     let proc;
     try {
       proc = spawn(process.execPath, [serverFile], {
@@ -164,7 +176,7 @@ export function apply(ctx, config) {
     proc.stdout.on("data", (d) => log(d.toString().trim()));
     proc.stderr.on("data", (d) => log(d.toString().trim()));
     proc.on("error", (e) => {
-      log(`process error: ${e.message}`);
+      log(`process error: ${e.message} (cwd=${JSON.stringify(s.stateDir)})`);
       if (child === proc) {
         child = undefined;
         scheduleRestart();
@@ -175,8 +187,13 @@ export function apply(ctx, config) {
       log(`exited code=${code} signal=${sig}`);
       if (code !== 0 && code !== null) scheduleRestart();
     });
-    restartCount = 0;
-    log(`started pid=${proc.pid} port=${s.port} -> ${s.upstream}`);
+    // Reset the backoff only once the child really started. Resetting it
+    // eagerly made the `restartCount >= 5` give-up guard unreachable, so a
+    // permanent failure looped at "attempt 1" once a second, forever.
+    proc.on("spawn", () => {
+      restartCount = 0;
+      log(`started pid=${proc.pid} port=${s.port} -> ${s.upstream}`);
+    });
   }
 
   function scheduleRestart() {
@@ -271,32 +288,41 @@ export function apply(ctx, config) {
   ctx.effect(() => {
     log(`bundle=${BUNDLE_DIR}`);
     applySettings();
-    const ws = ctx.get("webServer");
-    if (ws !== undefined) {
-      try {
-        bridgeOff = ws.register({
-          kind: "prefix",
-          path: BRIDGE_PREFIX,
-          handler: bridgeHandler,
-        });
-      } catch (e) {
-        log(`bridge register failed: ${e.message}`);
-      }
-    } else {
-      log("webServer unavailable; bridge not registered");
-    }
     return () => {
       disposed = true;
-      if (bridgeOff) {
-        try { bridgeOff(); } catch { /* ignore */ }
-        bridgeOff = undefined;
-      }
       if (restartTimer !== undefined) {
         clearTimeout(restartTimer);
         restartTimer = undefined;
       }
       stopChild();
     };
+  });
+
+  // The bridge lives on the web server, which is an optional service here — a
+  // deployment may compose none of it. Declare it through `ctx.inject` instead
+  // of a one-shot `ctx.get()` for it while mounting: the web app provides
+  // that service and can come up *after* this row, and a single get() then
+  // missed it for the whole life of the instance. The failure is silent and
+  // total — the route is never registered, so every /__dfusion/* request 404s
+  // and the composer chip's 3s poll dies parsing an empty body.
+  ctx.inject(["webServer"], (bridgeCtx) => {
+    bridgeCtx.effect(() => {
+      let off;
+      try {
+        off = bridgeCtx.webServer.register({
+          kind: "prefix",
+          path: BRIDGE_PREFIX,
+          handler: bridgeHandler,
+        });
+      } catch (e) {
+        log(`bridge register failed: ${e.message}`);
+        return () => {};
+      }
+      log(`bridge registered on ${BRIDGE_PREFIX}`);
+      return () => {
+        try { off(); } catch { /* already gone */ }
+      };
+    }, `${name}: ${BRIDGE_PREFIX} bridge`);
   });
 
   // A volatile-only configuration edit keeps this instance and lands here.

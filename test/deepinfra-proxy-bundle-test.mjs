@@ -23,7 +23,7 @@
  * directory, which the harness removes on exit; nothing touches $DSH_HOME.
  */
 import http from "node:http";
-import { rmSync, mkdtempSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { rmSync, mkdtempSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -125,6 +125,16 @@ function createCtx(initial) {
       injected.push([...deps]);
       if (deps.includes("settings")) {
         callback({ settings: settingsStub, effect: (fn) => { fn(); return () => {}; } });
+      }
+      if (deps.includes("webServer")) {
+        callback({
+          webServer: webServerStub,
+          effect: (fn) => {
+            const off = fn();
+            if (typeof off === "function") disposers.push(off);
+            return () => {};
+          },
+        });
       }
     },
     on(event, fn) {
@@ -251,6 +261,18 @@ async function main() {
   check("plugin keeps no absolute D:\\ install path", !/["']D:\\\\/.test(pluginSource));
   check("plugin defaults the state dir under $DSH_HOME", pluginSource.includes("process.env.DSH_HOME"));
   check("plugin has no hidden <stateDir>/server.js fallback", !pluginSource.includes('path.join(s.stateDir, "server.js")'));
+  check(
+    "plugin creates the state dir before spawning the kernel (spawn cwd must exist)",
+    /mkdirSync\(\s*s\.stateDir\s*,\s*\{\s*recursive:\s*true\s*\}\s*\)/.test(pluginSource)
+      && pluginSource.indexOf("mkdirSync(s.stateDir") !== -1
+      && pluginSource.indexOf("mkdirSync(s.stateDir") < pluginSource.indexOf("proc = spawn("),
+    "spawn() passes cwd = stateDir; a missing cwd surfaces as ENOENT named after the executable",
+  );
+  check(
+    "plugin waits for the webServer service through ctx.inject (not a one-shot get)",
+    pluginSource.includes('ctx.inject(["webServer"]') && !/ctx\.get\(\s*["']webServer["']\s*\)/.test(pluginSource),
+    "a webServer provided after mount was missed for the life of the instance",
+  );
   check("plugin needs schemastery", pluginSource.includes('from "@deepseek-ai/schemastery"'));
   check("plugin no longer registers a settings namespace the old way", !pluginSource.includes("ctx.settings.register") && !pluginSource.includes("ctx.settings.get"));
   check("plugin no longer listens on the removed settings/updated event", !pluginSource.includes('"settings/updated"'));
@@ -322,6 +344,11 @@ async function main() {
 
   check("registers its own page policy (settings.configure({auto:false}))", ctx._pagePolicies.length === 1 && ctx._pagePolicies[0].presentation?.auto === false && ctx._pagePolicies[0].owner === ctx.fiber, JSON.stringify(ctx._pagePolicies.map((p) => p.presentation)));
   check("asks for the settings service only optionally", ctx._injected.some((deps) => deps.includes("settings")), JSON.stringify(ctx._injected));
+  check(
+    "waits for the webServer service through the loader",
+    ctx._injected.some((deps) => deps.includes("webServer")),
+    JSON.stringify(ctx._injected),
+  );
   const route = ctx._routes.find((r) => r.path === BRIDGE_PREFIX);
   check("registers the /__dfusion prefix route on the webserver", route !== undefined && route.kind === "prefix" && typeof route.handler === "function", JSON.stringify(ctx._routes.map((r) => ({ kind: r.kind, path: r.path }))));
 
@@ -372,6 +399,38 @@ async function main() {
   await sleep(300);
   rmSync(stateDir, { recursive: true, force: true });
   check("the harness leaves no runtime state behind", !existsSync(stateDir));
+
+  // ── D. stateDir bootstrap (regression) ───────────────────────────────────
+  // The kernel is spawned with `cwd = stateDir`, and spawn() reports a missing
+  // cwd as ENOENT *named after the executable* — indistinguishable from a
+  // missing node.exe. Until this was fixed, a profile whose state dir did not
+  // exist yet (i.e. every fresh install) restart-looped forever and could never
+  // create it, because creating it was server.js's job on boot.
+  console.log("\n-- D. stateDir bootstrap --");
+  const absentDir = join(tmpdir(), `deepinfra-fusion-proxy-absent-${process.pid}-${Date.now()}`);
+  rmSync(absentDir, { recursive: true, force: true });
+  check("the state dir really starts out absent", !existsSync(absentDir), absentDir);
+
+  // The assertion is about the directory, not about a live child, so it holds
+  // on a host that cannot spawn as well as on one that can (the stub kernel
+  // exits immediately where spawning works).
+  const stubKernel = join(tmpdir(), `deepinfra-fusion-proxy-stub-${process.pid}-${Date.now()}.js`);
+  writeFileSync(stubKernel, "process.exit(0);\n");
+  const bootCtx = createCtx({
+    enabled: true,
+    port: await freePort(),
+    upstream: "https://api.deepinfra.com/v1/openai",
+    stateDir: absentDir,
+    serverPath: stubKernel,
+  });
+  plugin.apply(bootCtx, bootCtx._refs);
+  await sleep(400);
+  check("a missing state dir is created before the kernel is spawned", existsSync(absentDir), absentDir);
+  bootCtx._disposeAll();
+  await sleep(250);
+  rmSync(absentDir, { recursive: true, force: true });
+  rmSync(stubKernel, { force: true });
+  check("the bootstrap harness leaves no runtime state behind", !existsSync(absentDir) && !existsSync(stubKernel));
 
   // ── report ───────────────────────────────────────────────────────────────
   console.log(`\n${passed} passed, ${failures.length} failed`);
