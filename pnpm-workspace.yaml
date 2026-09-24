@@ -1,0 +1,6 @@
+# pnpm 11 keeps project settings in this file. The test harness needs only the
+# real schemastery — the host plugin's single import. `@deepseek-ai/dsh` is
+# declared as a peer solely so the harness reproduces the release's plugin
+# compatibility gate; it must NOT be installed here, or a test run would drag
+# the whole harness tree into this checkout.
+autoInstallPeers: false
