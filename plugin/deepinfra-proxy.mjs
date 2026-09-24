@@ -116,6 +116,18 @@ export function apply(ctx, config) {
     console.log(`[deepinfra-proxy] ${line}`);
   }
 
+  /**
+   * Log a condition once: the gate below is evaluated per request, and a
+   * deployment whose `connection` service has an unexpected shape must not
+   * flood the console with one warning per poll.
+   */
+  let gateWarned = false;
+  function warnGateOnce(line) {
+    if (gateWarned) return;
+    gateWarned = true;
+    log(line);
+  }
+
   /** Read one `.get()` per configured field; an absent field keeps its schema default. */
   function readConfig() {
     const parsed = config ?? Config({});
@@ -260,6 +272,26 @@ export function apply(ctx, config) {
       res.writeHead(404, { "content-type": "text/plain" });
       res.end("not found");
       return;
+    }
+    // A webserver prefix route is NOT gated by the web server: `register()`
+    // only matches paths, and WebRoute carries no auth option. Run the same
+    // Host/Origin fence plus browser-session check DSH applies to its own /api
+    // route, or this bridge is an unauthenticated read/write endpoint for the
+    // proxy's runtime config. The service is optional (a deployment that
+    // composes no web app has no auth to reuse), so a missing one degrades to
+    // a no-op — loudly, once, rather than silently.
+    const connection = ctx.get("connection");
+    if (connection !== undefined) {
+      if (typeof connection.requestRejection === "function") {
+        const rejection = connection.requestRejection(req);
+        if (rejection !== undefined) {
+          res.writeHead(rejection, { "cache-control": "no-store", "content-type": "text/plain; charset=utf-8" });
+          res.end(rejection === 401 ? "dsh web authentication required\n" : "forbidden\n");
+          return;
+        }
+      } else {
+        warnGateOnce("connection service exposes no requestRejection(); the /__dfusion bridge is UNGATED");
+      }
     }
     let tail = url.pathname.slice(BRIDGE_PREFIX.length);
     if (tail.startsWith("/")) tail = tail.slice(1);

@@ -95,7 +95,7 @@ function freePort() {
  * `_commit(patch)` is the Loader half: it moves the references and re-fires
  * `loader/volatile-update`, exactly as the Loader's volatile commit does.
  */
-function createCtx(initial) {
+function createCtx(initial, options = {}) {
   const state = { ...initial };
   const refs = {};
   for (const field of Object.keys(state)) refs[field] = { get: () => state[field] };
@@ -116,10 +116,19 @@ function createCtx(initial) {
       return () => {};
     },
   };
+  /** What DSH's own /api route would answer for a request: undefined means admitted. */
+  let authRejection;
+  const connectionStub = {
+    requestRejection() {
+      return authRejection;
+    },
+  };
   const ctx = {
     fiber: { entry: { options: { id: ROW_ID, name: "./plugin/deepinfra-proxy.mjs", config: undefined } } },
     get(name) {
-      return name === "webServer" ? webServerStub : undefined;
+      if (name === "webServer") return webServerStub;
+      if (name === "connection") return options.connection === false ? undefined : connectionStub;
+      return undefined;
     },
     inject(deps, callback) {
       injected.push([...deps]);
@@ -149,6 +158,11 @@ function createCtx(initial) {
     _refs: refs,
     _state: state,
     _routes: routes,
+    _connection: connectionStub,
+    /** Stand in for what DSH would answer: 401/403, or undefined to admit. */
+    _setRejection(value) {
+      authRejection = value;
+    },
     _pagePolicies: pagePolicies,
     _injected: injected,
     /** Loader's volatile commit: move the references, then notify the owner. */
@@ -273,6 +287,11 @@ async function main() {
     pluginSource.includes('ctx.inject(["webServer"]') && !/ctx\.get\(\s*["']webServer["']\s*\)/.test(pluginSource),
     "a webServer provided after mount was missed for the life of the instance",
   );
+  check(
+    "the bridge runs DSH's request gate before forwarding",
+    pluginSource.includes('ctx.get("connection")') && pluginSource.includes("requestRejection"),
+    "an ungated prefix route is an unauthenticated read/write endpoint for the runtime config",
+  );
   check("plugin needs schemastery", pluginSource.includes('from "@deepseek-ai/schemastery"'));
   check("plugin no longer registers a settings namespace the old way", !pluginSource.includes("ctx.settings.register") && !pluginSource.includes("ctx.settings.get"));
   check("plugin no longer listens on the removed settings/updated event", !pluginSource.includes('"settings/updated"'));
@@ -356,6 +375,18 @@ async function main() {
   const bridge = http.createServer((req, res) => route.handler(req, res));
   await new Promise((r) => bridge.listen(bridgePort, "127.0.0.1", r));
 
+  // A webserver route is not gated by the web server, so the bridge itself has
+  // to run the Host/Origin + browser-session gate before it forwards anything.
+  ctx._setRejection(401);
+  const denied = await httpReq(bridgePort, { path: `${BRIDGE_PREFIX}/state` });
+  check("the bridge refuses a request DSH would reject", denied.status === 401, `status=${denied.status}`);
+  ctx._setRejection(403);
+  const fenced = await httpReq(bridgePort, { path: `${BRIDGE_PREFIX}/state` });
+  check("the bridge propagates the Host/Origin fence rejection", fenced.status === 403, `status=${fenced.status}`);
+  ctx._setRejection(undefined);
+  const admitted = await httpReq(bridgePort, { path: `${BRIDGE_PREFIX}/state` });
+  check("the bridge admits a request DSH would accept", admitted.status !== 401 && admitted.status !== 403, `status=${admitted.status}`);
+
   async function bridgeState(tries = 60) {
     let last = { status: "timeout", body: undefined };
     for (let i = 0; i < tries; i += 1) {
@@ -431,6 +462,33 @@ async function main() {
   rmSync(absentDir, { recursive: true, force: true });
   rmSync(stubKernel, { force: true });
   check("the bootstrap harness leaves no runtime state behind", !existsSync(absentDir) && !existsSync(stubKernel));
+
+  // ── E. the bridge gate is optional ───────────────────────────────────────
+  // A deployment that composes no web app has no `connection` service to gate
+  // with; the bridge must still register and forward rather than hard-fail.
+  console.log("\n-- E. bridge without the connection service --");
+  const openDir = join(tmpdir(), `deepinfra-fusion-proxy-open-${process.pid}-${Date.now()}`);
+  rmSync(openDir, { recursive: true, force: true });
+  const openCtx = createCtx({
+    enabled: true,
+    port: await freePort(),
+    upstream: "https://api.deepinfra.com/v1/openai",
+    stateDir: openDir,
+    serverPath: join(ROOT, "server.js"),
+  }, { connection: false });
+  plugin.apply(openCtx, openCtx._refs);
+  const openRoute = openCtx._routes.find((r) => r.path === BRIDGE_PREFIX);
+  check("the bridge still registers without a connection service", openRoute !== undefined);
+  const openHandler = openRoute === undefined ? (req, res) => { res.writeHead(500); res.end(); } : openRoute.handler;
+  const openPort = await freePort();
+  const openServer = http.createServer((req, res) => openHandler(req, res));
+  await new Promise((r) => openServer.listen(openPort, "127.0.0.1", r));
+  const openRes = await httpReq(openPort, { path: `${BRIDGE_PREFIX}/state` });
+  check("an ungated deployment is not turned into a hard failure", openRes.status !== 401 && openRes.status !== 403, `status=${openRes.status}`);
+  await new Promise((r) => openServer.close(r));
+  openCtx._disposeAll();
+  await sleep(250);
+  rmSync(openDir, { recursive: true, force: true });
 
   // ── report ───────────────────────────────────────────────────────────────
   console.log(`\n${passed} passed, ${failures.length} failed`);
