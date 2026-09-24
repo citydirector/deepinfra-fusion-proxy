@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DeepInfra 融合代理",
+    "description": "DeepInfra API 的本地反向代理：注入 service_tier / fail_fast，按会话在 Standard 与 Flex 间自动回退，并附带驱动它的会话区切换卡片。"
+  }
+}

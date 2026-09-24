@@ -2,9 +2,9 @@
 
 > **English** · [**简体中文**](#简体中文)
 
-A dependency-free local reverse proxy for the [DeepInfra](https://deepinfra.com) API that turns the service-tier knobs into first-class switches and adds automatic `Standard ↔ Flex` fallback with per-session cooldown locks. It also ships as a **DSH (DeepSeek Harness) profile bundle**, so a DSH install can add the proxy *and* its per-session toggle card straight from this repository URL.
+A dependency-free local reverse proxy for the [DeepInfra](https://deepinfra.com) API that turns the service-tier knobs into first-class switches and adds automatic `Standard ↔ Flex` fallback with per-session cooldown locks. It also ships as a **DSH (DeepSeek Harness) profile bundle** (DSH ≥ 0.1.7-rc.1), so a DSH install can add the proxy, its per-session toggle card *and* the bundle row's configuration page straight from this repository URL.
 
-一个零依赖的 [DeepInfra](https://deepinfra.com) API 本地反向代理：把服务档位（service tier）参数变成开箱即用的开关，并实现自动 `Standard ↔ Flex` 回退与按会话的冷却锁。同时以 **DSH（DeepSeek Harness）profile bundle** 形式发布，DSH 可直接从本仓库 URL 一次装好代理与它的按会话切换卡片。
+一个零依赖的 [DeepInfra](https://deepinfra.com) API 本地反向代理：把服务档位（service tier）参数变成开箱即用的开关，并实现自动 `Standard ↔ Flex` 回退与按会话的冷却锁。同时以 **DSH（DeepSeek Harness）profile bundle** 形式发布（需 DSH ≥ 0.1.7-rc.1），DSH 可直接从本仓库 URL 一次装好代理、按会话切换卡片与 bundle 行的配置页。
 
 ---
 
@@ -30,6 +30,7 @@ Most clients have no way to send these top-level fields, and switching between t
 - **Automatic fallback** — a `429` on a Flex attempt retries once as Standard, then either stays on Standard (`fallbackAction: "stay"`) or arms a per-session cooldown lock (`fallbackAction: "cooldown"`) that auto-returns to Flex after N rounds.
 - **Wait policy** — per session, choose **fail-fast** (`fail_fast: true`, busy → immediate 429 → fallback) or **wait** (`fail_fast: false`, busy → queue up to the provider cap, ~10 minutes on DeepInfra).
 - **Control API** — JSON endpoints for state, config, and unlocking cooldown locks, so a GUI or script can drive it live without a restart.
+- **DSH 0.1.7 configuration** — the host plugin declares its connection fields in its own Cordis `Config` (every field `.volatile()`), so on DSH 0.1.7+ the values live in the active profile's `cordis.patch.yml` and an edit restarts the supervised child in place instead of remounting the plugin. The bundle ships the row's configuration page (Plugins → `deepinfra-fusion-proxy` → `deepinfra-proxy` → 配置).
 - **Zero dependencies in the core** — pure Node stdlib (`http`/`https`/`fs`/`path`), so `server.js` runs straight from a checkout with nothing to install. (The DSH host plugin beside it imports the harness' own `@deepseek-ai/schemastery`, declared as a dependency so a bundle install resolves it.)
 
 ### How it works
@@ -100,8 +101,13 @@ What the bundle inserts (`cordis.patch.yml`, two id-addressed rows — a user-la
 
 - **Host plugin** — starts/stops the proxy core with DSH, restarts it with backoff, releases the port on unload, and registers the same-origin `/__dfusion/*` → `/__proxy/*` bridge the card talks through.
 - **Toggle card** — a chip in the composer tool row (`conversation.input.right`) with a popover for Standard/Flex, wait policy, cooldown rounds and fallback behaviour. It drives the proxy's own `config.json`, so it survives a DSH restart and needs no shipped-code change.
-- **Layout** — everything is bundle-relative: the core is `<bundle>/server.js`, the state dir defaults to `$DSH_HOME/deepinfra-proxy` (`config.json` / `locks.json`), and both are overridable through the `deepinfra-proxy` settings namespace (see `config/settings.example.yaml`).
+- **Configuration page** — the same browser half registers the bundle row's page on the Plugins page (`plugins.row.config`, keyed `deepinfra-fusion-proxy#deepinfra-proxy`) over the shared `configForms` service, covering the host Config: `enabled`, `port`, `upstream`, `stateDir`, `serverPath`. Those are connection fields and are deliberately *not* the same thing as the runtime mode above.
+- **Layout** — everything is bundle-relative: the core is `<bundle>/server.js`, the state dir defaults to `$DSH_HOME/deepinfra-proxy` (`config.json` / `locks.json`), and both are overridable through this plugin's own Config. `config/cordis.patch.example.yml` shows the profile-layer form; you normally edit the page instead.
+- **Row id is load-bearing** — on DSH 0.1.7+ a plugin's settings namespace **is** its profile entry id, so the host row stays `deepinfra-proxy` (equal to the plugin name and to the legacy `settings.yaml` section, which the one-shot migration still imports).
+- **Compatibility gate** — `peerDependencies: { "@deepseek-ai/dsh": ">=0.1.7-rc.1 <0.2.0" }` (plus a declarative `engines.dsh`). Version **2.0.0** is rc.1-only by design: `.volatile()` needs `@deepseek-ai/schemastery` ≥ 3.18.4 and the old client `settingsScope` service is gone, so there is no 0.1.6 branch.
 - **Point a route at it** — e.g. an `openai-completions` provider with `baseURL: http://127.0.0.1:8790/v1/openai` and `cacheRetention: long` (that is what supplies the per-session `prompt_cache_key`).
+
+**Upgrading an existing 0.1.6 install.** A profile's `pnpm-lock.yaml` pins a git dependency to a commit, so pushing this release does not move an already-installed copy. Correct order: upgrade DSH to ≥ 0.1.7 first, then in `data/profiles/<profile>` run `pnpm add github:citydirector/deepinfra-fusion-proxy`, then toggle the bundle (Plugins page off/on, or `tools/plugin-manager.mjs enable deepinfra-fusion-proxy false/true`) so the host re-imports it. Doing it in the other order is survivable but noisy — on 0.1.6 the only symptom is a `Config.….volatile is not a function` load error (there is no compatibility gate to stop it), and reverting the pin is the fix.
 
 ### Configuration
 
@@ -154,10 +160,16 @@ The per-session key is the request body's `prompt_cache_key`. OpenAI-compatible 
 ### Testing
 
 ```bash
-npm test    # or: node test/run-wait-test.js && node test/bundle-layout-test.mjs
+npm test    # or: node test/deepinfra-proxy-bundle-test.mjs && node test/run-wait-test.js
 ```
 
-The test spins up the bundled mock upstream (`test-mock-upstream.js`, echoes the received body, can force 429) and a proxy instance on throwaway ports with a throwaway state dir, then asserts:
+`test/deepinfra-proxy-bundle-test.mjs` covers the bundle contract (no DSH, no network — except the localhost bridge it drives itself):
+
+- **package layout** — `dsh.bundle.patch` declared, every patch row resolving to a file the `files` list ships, the `ui/` dual-face client package, the icon + `locale/{en,zh}.json` page metadata, and the host plugin anchoring on bundle-relative paths with no machine-specific absolute path baked in;
+- **the 0.1.7 settings contract** — the real schemastery `Config` parses into live `.get()` references with schema defaults, every field is `.volatile()`, the schema serializes for the form projection, and every field is editable in the browser half; plus static guards that the removed `ctx.settings.register` / `ctx.settings.get` / `settings/updated` APIs are gone;
+- **the live host contract** — a mocked DSH context (`webServer` route registration, `loader/volatile-update`, the optional page policy) around the real plugin, which spawns the real `server.js`; the harness drives the `/__dfusion/` bridge over HTTP and asserts that a volatile `enabled: false` commit stops the supervised child, `enabled: true` restarts it, and disposal stops it.
+
+`test/run-wait-test.js` spins up the bundled mock upstream (`test-mock-upstream.js`, records the received body, can force 429) and a proxy instance on throwaway ports with a throwaway state dir, then asserts:
 
 - flex + fail-fast injects `service_tier: "flex"`, `fail_fast: true`
 - flex + wait injects `fail_fast: false` (queueing)
@@ -166,9 +178,13 @@ The test spins up the bundled mock upstream (`test-mock-upstream.js`, echoes the
 - per-session maps merge (setting one session doesn't wipe others; `null` deletes)
 - `defaultWait` / `waitModes` round-trip through the control API
 
-The mock writes its debug scratch to the OS temp dir, and the test self-cleans its throwaway state — the checkout stays pristine.
+The mock writes its debug scratch to the OS temp dir, and both suites clean their throwaway state (the host-contract harness kills the child it spawned) — the checkout stays pristine.
 
-`test/bundle-layout-test.mjs` is the packaging guard (no DSH, no network, no ports): it asserts the manifest declares `dsh.bundle.patch`, every patch row resolves to a file the `files` list actually ships, the `ui/` package is a well-formed dual-face client package, and the plugin anchors on bundle-relative paths with no machine-specific absolute path baked in.
+Running the harness needs the real schemastery, so install once:
+
+```bash
+pnpm install    # reads pnpm-workspace.yaml: autoInstallPeers=false keeps @deepseek-ai/dsh a peer only
+```
 
 ### Security notes
 
@@ -204,6 +220,7 @@ DeepInfra 会给部分模型标注服务档位（参考 [Chat Completions 概览
 - **自动回退** — Flex 尝试遇到 `429` 后，以 Standard 重试一次，然后要么停在 Standard（`fallbackAction: "stay"`），要么挂上按会话的冷却锁（`fallbackAction: "cooldown"`），N 轮后自动回到 Flex。
 - **等待策略** — 按会话选择 **立即失败**（`fail_fast: true`，忙时立刻 429 → 回退）或 **排队等待**（`fail_fast: false`，忙时入队，DeepInfra 上限约 10 分钟）。
 - **控制 API** — 提供状态 / 配置 / 解锁冷却锁的 JSON 端点，GUI 或脚本可免重启实时驱动。
+- **DSH 0.1.7 配置模型** — 宿主插件用自己的 Cordis `Config` 声明连接字段（全部 `.volatile()`），因此在 0.1.7+ 上这些值落在活动 profile 的 `cordis.patch.yml` 里，改动是**原地重启**被监管的子进程，而不是重挂插件。bundle 同时提供该行的配置页（插件页 → `deepinfra-fusion-proxy` → `deepinfra-proxy` → 配置）。
 - **内核零依赖** — 仅用 Node 标准库（`http`/`https`/`fs`/`path`），`server.js` 从检出目录直接就能跑、无需安装。（它旁边的 DSH 宿主插件会 import 宿主自带的 `@deepseek-ai/schemastery`，已声明为依赖，bundle 安装时由 pnpm 解析。）
 
 ### 工作原理
@@ -273,8 +290,13 @@ bundle 插入的内容（`cordis.patch.yml`，两行按 id 定位——用户层
 
 - **宿主插件** — 随 DSH 启停代理内核、异常退出按退避重启、卸载时释放端口，并注册卡片所用的同源 `/__dfusion/*` → `/__proxy/*` 桥接。
 - **切换卡片** — 会话输入区工具行（`conversation.input.right`）的 chip，弹出面板可切 Standard/Flex、等待策略、冷却轮数与 429 回退方式。它驱动代理自身的 `config.json`，重启 DSH 仍保留，且不需要改任何随包发布的代码。
-- **目录约定** — 全部相对 bundle：内核是 `<bundle>/server.js`，状态目录默认 `$DSH_HOME/deepinfra-proxy`（`config.json` / `locks.json`），二者都可在 `deepinfra-proxy` settings 命名空间里覆盖（见 `config/settings.example.yaml`）。
+- **配置页** — 同一个浏览器半边还在插件页注册了该 bundle 行的配置页（`plugins.row.config`，key = `deepinfra-fusion-proxy#deepinfra-proxy`），走共享的 `configForms` 服务，覆盖宿主 Config 的 `enabled`、`port`、`upstream`、`stateDir`、`serverPath`。这些是**连接字段**，与上面那个运行时档位刻意分开。
+- **目录约定** — 全部相对 bundle：内核是 `<bundle>/server.js`，状态目录默认 `$DSH_HOME/deepinfra-proxy`（`config.json` / `locks.json`），二者都可在插件自己的 Config 里覆盖。`config/cordis.patch.example.yml` 给出 profile 层的写法；通常你直接在配置页改就行。
+- **行 id 是承重的** — 0.1.7+ 里插件的设置命名空间**就是**它的 profile entry id，所以宿主行保持 `deepinfra-proxy`（与插件名、与旧 `settings.yaml` 段名三者同名，一次性迁移仍能导入）。
+- **兼容门禁** — `peerDependencies: { "@deepseek-ai/dsh": ">=0.1.7-rc.1 <0.2.0" }`（另有声明性的 `engines.dsh`）。版本 **2.0.0** 只支持 rc.1 线：`.volatile()` 需要 `@deepseek-ai/schemastery` ≥ 3.18.4，且旧的客户端 `settingsScope` 服务已移除，因此不做 0.1.6 双兼容。
 - **把路由指过来** — 例如一个 `openai-completions` provider，`baseURL: http://127.0.0.1:8790/v1/openai` 且 `cacheRetention: long`（按会话的 `prompt_cache_key` 正是由此而来）。
+
+**升级已有的 0.1.6 安装。** profile 的 `pnpm-lock.yaml` 会把 git 依赖钉在某个 commit 上，所以推送本版本**不会**移动已安装的副本。正确顺序：先把 DSH 升到 ≥ 0.1.7，再在 `data/profiles/<profile>` 里执行 `pnpm add github:citydirector/deepinfra-fusion-proxy`，然后 toggle 该 bundle（插件页关→开，或 `tools/plugin-manager.mjs enable deepinfra-fusion-proxy false/true`）让宿主重新 import。顺序反了也能活，只是会报错：0.1.6 上唯一症状是加载时报 `Config.….volatile is not a function`（0.1.6 没有门禁拦它），把 pin 退回去即可。
 
 ### 配置
 
@@ -327,10 +349,16 @@ curl http://127.0.0.1:8790/__proxy/state
 ### 测试
 
 ```bash
-npm test    # 或：node test/run-wait-test.js && node test/bundle-layout-test.mjs
+npm test    # 或：node test/deepinfra-proxy-bundle-test.mjs && node test/run-wait-test.js
 ```
 
-测试会拉起仓库自带的 mock 上游（`test-mock-upstream.js`，回显收到的请求体、可强制 429）和一个使用一次性端口/状态目录的代理实例，然后断言：
+`test/deepinfra-proxy-bundle-test.mjs` 覆盖 bundle 契约（不依赖 DSH、不联外网——只驱动它自己起的 localhost 桥接）：
+
+- **打包形态** — 声明 `dsh.bundle.patch`、每条补丁行都指向 `files` 确实会打包的文件、`ui/` 是合规的双面客户端包、图标与 `locale/{en,zh}.json` 页面元数据齐备、宿主插件只用 bundle 相对路径且没有写死机器绝对路径；
+- **0.1.7 设置契约** — 用**真** schemastery 断言 `Config({})` 返回带默认值的活引用、每个字段都是 `.volatile()`、schema 能序列化给表单投影、且每个字段在浏览器半边都可编辑；另有静态守卫确认已移除的 `ctx.settings.register` / `ctx.settings.get` / `settings/updated` 旧 API 不再出现；
+- **实机宿主契约** — 用 mock 的 DSH 上下文（`webServer` 路由注册、`loader/volatile-update`、可选的页面策略）包住真插件，由它拉起真的 `server.js`；测试台再通过 HTTP 驱动 `/__dfusion/` 桥接，断言 volatile 提交 `enabled: false` 会停掉被监管的子进程、`enabled: true` 会重启它、dispose 会停掉它。
+
+`test/run-wait-test.js` 会拉起仓库自带的 mock 上游（`test-mock-upstream.js`，记录收到的请求体、可强制 429）和一个使用一次性端口/状态目录的代理实例，然后断言：
 
 - flex + 立即失败注入 `service_tier: "flex"`、`fail_fast: true`
 - flex + 等待注入 `fail_fast: false`（排队）
@@ -339,9 +367,13 @@ npm test    # 或：node test/run-wait-test.js && node test/bundle-layout-test.m
 - 按会话映射按键合并（设置一个会话不会清掉其它会话；`null` 删除）
 - `defaultWait` / `waitModes` 经控制 API 往返一致
 
-mock 把调试残留写到系统临时目录，测试运行后自清理临时状态——检出目录始终保持整洁。
+mock 把调试残留写到系统临时目录，两套测试都会清理自己的一次性状态（宿主契约测试台会杀掉它拉起的子进程）——检出目录始终保持整洁。
 
-`test/bundle-layout-test.mjs` 是打包形态的守卫（不依赖 DSH、不联网、不占端口）：断言清单声明了 `dsh.bundle.patch`、每条补丁行都指向 `files` 确实会打包的文件、`ui/` 是合规的双面客户端包，且宿主插件只依赖 bundle 相对路径、没有写死机器绝对路径。
+测试台要用真的 schemastery，先装一次：
+
+```bash
+pnpm install    # 读 pnpm-workspace.yaml：autoInstallPeers=false，@deepseek-ai/dsh 只作 peer 声明
+```
 
 ### 安全说明
 

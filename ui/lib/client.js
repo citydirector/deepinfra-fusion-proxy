@@ -1,7 +1,13 @@
 /**
- * deepinfra-proxy-ui, browser half — per-session Standard/Flex hot-toggle for
- * the DeepInfra proxy, rendered in the composer tool row (before the submit
- * action). A polished chip with a popover card, using DSH theme tokens only.
+ * deepinfra-proxy-ui, browser half — two contributions for the DeepInfra
+ * fusion proxy:
+ *
+ *  1. the per-session Standard/Flex hot-toggle chip in the composer tool row
+ *     (`conversation.input.right`), which drives the proxy core's own runtime
+ *     state through the host's `/__dfusion/` bridge; and
+ *  2. the bundle row's configuration page (`plugins.row.config`), which edits
+ *     the HOST plugin's live Config — enabled / port / upstream / stateDir /
+ *     serverPath — over the shared `configForms` service.
  *
  * Effective mode for the current session:
  *   cooldown lock active            -> "standard" (until lock expires or unlocked)
@@ -15,6 +21,16 @@
  * Chip: status dot + current mode (+ lock/queue hint); display-only.
  * Popover (▾): Standard/Flex segmented, wait policy, cooldown length, fallback
  *              behaviour, and the unlock action while locked.
+ *
+ * DSH 0.1.7 (2026-09-24): the 0.1.6-era `settingsScope` client service is gone.
+ * The shared configuration service is now `configForms`
+ * (`@deepseek-ai/dsh-client-ui-settings`), and a bundle row's own page is
+ * contributed through the Plugins page's `plugins.row.config` slot, keyed
+ * `<bundle package>#<row id>` — `plugins.item` is reserved for the shipped
+ * official settings pages. Every value the page edits is a `.volatile()` field
+ * of the host plugin's Config, so a save lands in the active profile's
+ * `cordis.patch.yml` and restarts the supervised child without remounting the
+ * plugin.
  */
 window.__ModuleLoader__.load({
   id: "deepinfra-proxy-ui",
@@ -23,8 +39,17 @@ window.__ModuleLoader__.load({
     var exports = module.exports;
     Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
     let react = require("react");
+    const {
+      SettingsForm,
+      SettingsFormModel,
+      SettingsValueField,
+      Switch,
+      Tag,
+      settingsNumberField,
+      settingsTextField,
+    } = require("@deepseek-ai/dsh-client-ui-primitives");
 
-    const inject = ["slots"];
+    const inject = ["slots", "configForms"];
 
     function hostBase() {
       const origin = globalThis.location && globalThis.location.origin;
@@ -379,12 +404,175 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // ---- bundle row configuration page (DSH 0.1.7+) ------------------------
+    /** Settings namespace — the host row's profile entry id, not a separate registration. */
+    const NS = "deepinfra-proxy";
+    /** Bundle package that declares the row; a row page is keyed `<package>#<row id>`. */
+    const BUNDLE = "deepinfra-fusion-proxy";
+    const ROW_KEY = BUNDLE + "#" + NS;
+
+    /** A two-state field; the card renders it as a Switch rather than a text box. */
+    const booleanField = (field) => ({
+      field,
+      format: (value) => (value === true ? "true" : "false"),
+      parse: (text) => ({ kind: "set", value: text === "true" }),
+    });
+
+    /** Every connection field the host Config declares, in card order. */
+    const FIELDS = [
+      { spec: booleanField("enabled"), kind: "boolean", label: "启用代理", hint: "关闭后宿主停止监管代理内核（llm-pi-ai 的 deepinfra 路由会失去 baseURL）" },
+      { spec: settingsNumberField("port"), kind: "number", label: "监听端口", hint: "代理监听端口（1–65535）；llm-pi-ai 的 baseURL 指向 http://127.0.0.1:<端口>/v1/openai" },
+      { spec: settingsTextField("upstream"), kind: "text", label: "上游地址", hint: "上游 DeepInfra OpenAI 兼容入口（默认 https://api.deepinfra.com/v1/openai）" },
+      { spec: settingsTextField("stateDir"), kind: "text", label: "状态目录", hint: "config.json / locks.json 的落点；默认 $DSH_HOME/deepinfra-proxy" },
+      { spec: settingsTextField("serverPath"), kind: "text", label: "内核路径", hint: "代理内核 server.js；默认 bundle 内的 server.js，通常不必改" },
+    ];
+
+    const S = {
+      field: { display: "flex", flexDirection: "column", gap: 6, padding: "12px 0", borderTop: "1px solid var(--dsw-alias-border-l2)" },
+      head: { display: "flex", alignItems: "center", gap: 8 },
+      label: { flex: 1, fontSize: 13, fontWeight: 500, color: "var(--dsw-alias-label-primary)" },
+      badges: { display: "inline-flex", alignItems: "center", gap: 8 },
+      reset: { cursor: "pointer", background: "none", border: 0, fontSize: 12, color: "var(--dsw-alias-label-secondary)" },
+      hint: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12, margin: 0 },
+    };
+
+    const T2 = {
+      unavailable: "配置暂不可用（宿主未提供该命名空间）",
+      readOnly: "配置只读（本部署以只读方式存储设置）",
+      saveFailed: "保存未生效，请检查输入",
+      saving: "保存中…",
+      save: "保存",
+      overridden: "已覆盖",
+      reset: "重置",
+      invalid: "输入无效",
+      invalidNumber: "请填数字；留空表示恢复默认",
+    };
+    /** Form-frame copy, read by the shared settings form. */
+    const FORM_LABELS = {
+      unavailable: T2.unavailable,
+      readOnly: T2.readOnly,
+      saveFailed: T2.saveFailed,
+      save: T2.save,
+      saving: T2.saving,
+    };
+    const SUMMARY = "为 llm-pi-ai 的 deepinfra 路由注入 service_tier / fail_fast，并按会话在 Standard 与 Flex 间自动回退";
+
+    /**
+     * Bridges this page onto the shared form of one Host entry: field reads,
+     * staged drafts, and the single revision-fenced write a save performs.
+     * Mirrors `ShellCardController` in the shipped settings pages.
+     */
+    class DeepInfraProxyCardController {
+      constructor(scope) {
+        this.form = new SettingsFormModel(scope, FIELDS.map((entry) => entry.spec));
+        this.store = this.form.bind(() => this.projection());
+      }
+      projection() {
+        const out = { ...this.form.shell() };
+        for (const entry of FIELDS) out[entry.spec.field] = this.form.field(entry.spec.field);
+        return out;
+      }
+      /** The face the page's slot entry injects: one snapshot store plus the form actions. */
+      inject() {
+        return { hooks: { dipCard: this.store }, ...this.form.actions() };
+      }
+      dispose() {
+        this.form.dispose();
+      }
+    }
+
+    /** Text/number input row over the shared primitives field. */
+    function ValueField(props) {
+      const { state, numeric, ...rest } = props;
+      return react.createElement(SettingsValueField, {
+        ...rest,
+        ...state,
+        numeric,
+        overriddenLabel: T2.overridden,
+        resetLabel: T2.reset,
+        invalidLabel: numeric ? T2.invalidNumber : T2.invalid,
+      });
+    }
+
+    /** Boolean toggle row; the shared primitives ship no boolean field control. */
+    function ToggleField(props) {
+      const { label, hint, state, disabled, onEdit, onReset } = props;
+      return react.createElement(
+        "div",
+        { style: S.field },
+        react.createElement(
+          "div",
+          { style: S.head },
+          react.createElement("label", { style: S.label }, label),
+          state.overridden
+            ? react.createElement(
+                "span",
+                { style: S.badges },
+                react.createElement(Tag, { tone: "neutral" }, T2.overridden),
+                react.createElement("button", { type: "button", style: S.reset, disabled, onClick: () => onReset() }, T2.reset),
+              )
+            : null,
+          react.createElement(Switch, {
+            checked: state.text === "true",
+            disabled,
+            label,
+            onChange: (next) => onEdit(next ? "true" : "false"),
+          }),
+        ),
+        hint ? react.createElement("p", { style: S.hint }, hint) : null,
+      );
+    }
+
+    /** The page: a one-liner for the row list, the configuration form for its own page. */
+    function DeepInfraProxyCard(props) {
+      if (props.view === "summary") return SUMMARY;
+      const state = props.useDipCard((snapshot) => snapshot);
+      const fields = FIELDS.map((entry) => {
+        const fieldState = state[entry.spec.field] ?? { text: "", overridden: false, invalid: false };
+        const shared = {
+          key: entry.spec.field,
+          id: "plugin-config-deepinfra-" + entry.spec.field,
+          label: entry.label,
+          hint: entry.hint,
+          state: fieldState,
+          disabled: !state.writable,
+          onReset: () => props.resetField(entry.spec.field),
+          onEdit: (value) => props.edit(entry.spec.field, value),
+        };
+        return entry.spec.kind === "boolean"
+          ? react.createElement(ToggleField, shared)
+          : react.createElement(ValueField, { ...shared, numeric: entry.spec.kind === "number" });
+      });
+      return react.createElement(
+        SettingsForm,
+        { labels: FORM_LABELS, state, onSave: props.save, onDiscard: props.discard },
+        fields,
+      );
+    }
+
     function apply(ctx) {
+      // 1) the live per-session Standard/Flex chip, in the composer tool row.
       ctx.slots.inject("conversation.input.right", () =>
         ctx.slots.register(
           { name: "conversation.input.right", id: "deepinfra-fusion-toggle", order: 50, label: "DeepInfra" },
           (props) => react.createElement(FusionChip, { sessionId: props.sessionId }),
         ),
+      );
+
+      // 2) the bundle row's configuration page, while the Host serves the namespace.
+      const card = new DeepInfraProxyCardController(ctx.configForms.get(NS));
+      ctx.effect(() => () => card.dispose(), "deepinfra-proxy-ui: form subscription");
+      ctx.effect(
+        () =>
+          ctx.configForms.whileServed([NS], () =>
+            ctx.slots.inject("plugins.row.config", () =>
+              ctx.slots.register(
+                { name: "plugins.row.config", key: ROW_KEY, inject: () => card.inject() },
+                DeepInfraProxyCard,
+              ),
+            ),
+          ),
+        "deepinfra-proxy-ui: configuration page",
       );
     }
 

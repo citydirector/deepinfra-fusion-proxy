@@ -1,0 +1,33 @@
+# deepinfra-fusion-proxy — profile-layer configuration example (DSH 0.1.7+)
+#
+# DSH 0.1.7 removed `settings.yaml`. A plugin's configuration now lives in the
+# active profile's own `cordis.patch.yml`, addressed by the profile entry id —
+# here `deepinfra-proxy`, the row this bundle declares.
+#
+# You normally do NOT need this file: open the Plugins page (sidebar →
+# Plugins), open the `deepinfra-fusion-proxy` bundle, open the
+# `deepinfra-proxy` row and use its 配置 page. That writes the same rows into
+# `data/profiles/<profile>/cordis.patch.yml` for you.
+#
+# Merge only the keys you want to pin — a key left out keeps the bundle layer's
+# value and then the schema default. Rows are addressed by id, so this user
+# layer overrides the bundle's row wholesale for the keys it states.
+#
+# Runtime mode (defaultMode / per-session Standard-Flex / cooldown locks / wait
+# policy) is deliberately NOT here: it belongs to the proxy core's own
+# config.json and is edited from the composer's DeepInfra chip.
+#
+# stateDir defaults to $DSH_HOME/deepinfra-proxy and serverPath to the bundle's
+# own server.js; these two keys deliberately carry no absolute-path example, so
+# nobody writes a machine path back into a portable profile.
+
+- id: deepinfra-proxy
+  config:
+    enabled: true
+    # 代理监听端口（llm 路由 baseURL 指到这里，默认 http://127.0.0.1:8790/v1/openai）
+    port: 8790
+    # 上游 DeepInfra OpenAI 兼容入口
+    upstream: https://api.deepinfra.com/v1/openai
+    # 只有确实要换位置时才取消注释：
+    # stateDir: <运行时状态目录>   # config.json / locks.json 的落点
+    # serverPath: <代理内核 server.js 的路径>

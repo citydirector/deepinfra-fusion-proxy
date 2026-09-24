@@ -10,14 +10,25 @@
  * and a hand-copied checkout behave the same — no install path is baked in:
  *   server.js  -> <bundle>/server.js          (the row anchors ./plugin/…)
  *   state dir  -> $DSH_HOME/deepinfra-proxy   (config.json / locks.json)
- * Both stay overridable through the `deepinfra-proxy` settings namespace
- * (enabled, port, upstream, stateDir, serverPath).
+ * Both stay overridable through this plugin's own Config (enabled, port,
+ * upstream, stateDir, serverPath) — see the DSH 0.1.7 note below.
  *
- * Runtime mode fields (defaultMode / coolLockRounds / per-session overrides)
- * are owned by the proxy's own config.json — the browser reaches the proxy
- * control endpoints through the `/__dfusion/` bridge route registered here on
- * the DSH web server, so per-session Standard/Flex switching needs no DSH
- * restart and no shipped-code change.
+ * Runtime mode fields (defaultMode / coolLockRounds / waitModes / per-session
+ * overrides) are owned by the proxy's own config.json — the browser reaches the
+ * proxy control endpoints through the `/__dfusion/` bridge route registered
+ * here on the DSH web server, so per-session Standard/Flex switching needs no
+ * DSH restart and no shipped-code change.
+ *
+ * DSH 0.1.7 configuration model (2026-09-24): `settings.yaml` is gone. A plugin
+ * declares its configurable values in its own Cordis `Config`, marks the ones
+ * that may change without a remount `.volatile()`, and reads them through those
+ * references; Loader commits volatile-only changes in place and notifies this
+ * instance through `loader/volatile-update`. Edits persist into the active
+ * profile's own `cordis.patch.yml` through the configuration editor, so the
+ * profile entry id — not a separately registered namespace — IS the settings
+ * namespace. Every field below is volatile, and the host row id equals the
+ * plugin name, so the legacy `settings.yaml` section of the same name still
+ * imports and the configuration page keys off `<package>#<row id>`.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -27,8 +38,20 @@ import http from "node:http";
 import { fileURLToPath } from "node:url";
 import z from "@deepseek-ai/schemastery";
 
+/**
+ * Plugin name, and on DSH 0.1.7+ the settings namespace too: the profile entry
+ * id of the host row in `cordis.patch.yml` has to equal both, or the legacy
+ * `settings.yaml` import is rejected and the configuration card never appears.
+ */
 export const name = "deepinfra-proxy";
-export const inject = ["settings"];
+
+/**
+ * No required services. The configuration is this plugin's own Config, the
+ * bridge is looked up through `ctx.get('webServer')`, and the settings service
+ * is only asked for a page policy — all three optional, so the proxy still runs
+ * (and still serves the LLM route) in a deployment that composes none of them.
+ */
+export const inject = [];
 
 /** The bundle root: this file lives in <bundle>/plugin/. */
 const BUNDLE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -47,35 +70,65 @@ const CONTROL_PREFIX = "/__proxy";
 // NB: webServer prefix paths must NOT end with '/' (matching is `path + "/"`).
 const BRIDGE_PREFIX = "/__dfusion";
 
-const Schema = z.object({
-  enabled: z.boolean().default(true),
-  port: z.number().min(1).max(65535).default(8790),
-  upstream: z.string().default("https://api.deepinfra.com/v1/openai"),
+/** Every configurable field, in configuration-page order. */
+const FIELDS = ["enabled", "port", "upstream", "stateDir", "serverPath"];
+
+/**
+ * The plugin's live configuration. Every field is `.volatile()`: a change is
+ * parsed and validated by Loader, committed into these stable references, and
+ * announced with `loader/volatile-update` — the running instance is retained,
+ * so the supervised child is restarted in place rather than re-imported. No
+ * ordinary field exists, so an edit never takes the remount lifecycle.
+ */
+export const Config = z.object({
+  enabled: z.boolean().default(true).volatile(),
+  port: z.number().min(1).max(65535).default(8790).volatile(),
+  upstream: z.string().default("https://api.deepinfra.com/v1/openai").volatile(),
   // Runtime state dir (config.json / locks.json); defaults to $DSH_HOME.
-  stateDir: z.string().default(DEFAULT_STATE_DIR),
+  stateDir: z.string().default(DEFAULT_STATE_DIR).volatile(),
   // The bundled proxy core; override only to point at a different build.
-  serverPath: z.string().default(DEFAULT_SERVER_PATH),
+  serverPath: z.string().default(DEFAULT_SERVER_PATH).volatile(),
 });
 
-export function apply(ctx) {
-  ctx.settings.register("deepinfra-proxy", Schema, { base: {} });
-
+/**
+ * Mount the supervised proxy core and keep it in step with the live Config.
+ *
+ * @param ctx - the plugin context.
+ * @param config - the schema-parsed Config: one `Volatile` reference per field.
+ */
+export function apply(ctx, config) {
   let child = undefined;
   let restartTimer = undefined;
   let restartCount = 0;
   let bridgeOff = undefined;
   let disposed = false;
 
-  // Serialize applySettings so rapid settings/updated events cannot interleave
-  // stop/spawn cycles.
+  // Serialize the stop/spawn cycles so rapid volatile commits cannot interleave.
   let opQueue = Promise.resolve();
+
+  // This plugin ships its own page for the bundle row; tell the settings service
+  // not to offer a generated one. Optional: a deployment without settings runs.
+  ctx.inject(["settings"], (childCtx) => {
+    childCtx.effect(() => childCtx.settings.configure({ auto: false }, ctx.fiber), `${name}: page policy`);
+  });
 
   function log(line) {
     console.log(`[deepinfra-proxy] ${line}`);
   }
 
+  /** Read one `.get()` per configured field; an absent field keeps its schema default. */
+  function readConfig() {
+    const parsed = config ?? Config({});
+    const values = {};
+    for (const field of FIELDS) {
+      const ref = parsed[field];
+      values[field] = ref !== undefined && typeof ref.get === "function" ? ref.get() : ref;
+    }
+    return values;
+  }
+
   function currentSettings() {
-    return ctx.settings.get("deepinfra-proxy");
+    return readConfig();
   }
 
   function spawnChild(s) {
@@ -246,7 +299,8 @@ export function apply(ctx) {
     };
   });
 
-  ctx.on("settings/updated", (ns) => {
-    if (ns === "deepinfra-proxy") applySettings();
+  // A volatile-only configuration edit keeps this instance and lands here.
+  ctx.on("loader/volatile-update", () => {
+    applySettings();
   });
 }

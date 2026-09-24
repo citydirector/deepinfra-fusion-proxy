@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DeepInfra Fusion Proxy",
+    "description": "Local reverse proxy for the DeepInfra API: injects service_tier / fail_fast and falls back between Standard and Flex per session, plus the composer chip that drives it."
+  }
+}
