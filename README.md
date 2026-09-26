@@ -99,6 +99,15 @@ What the bundle inserts (`cordis.patch.yml`, two id-addressed rows — a user-la
       name: ./ui/lib/index.js               # card host half; browser half = ui exports["./client"]
 ```
 
+Installing the package is not the same as activating the bundle: the profile loads the two
+rows above only when its `package.json` lists `deepinfra-fusion-proxy` in `dsh.profile.bundles`.
+A `dependencies` entry alone (a manual `pnpm add`, for example) leaves the profile with no row
+and no proxy — the Plugins panel writes the bundle entry for you, a manual install must add it too.
+
+Two profiles that share one `$DSH_HOME` (the portable and desktop apps pointed at the same `data`
+directory) both default to `$DSH_HOME/deepinfra-proxy` and share that state directory. Set a
+distinct `stateDir` and `port` per profile to keep the instances independent.
+
 - **Host plugin** — starts/stops the proxy core with DSH, restarts it with backoff, releases the port on unload, and registers the same-origin `/__dfusion/*` → `/__proxy/*` bridge the card talks through.
 - **Toggle card** — a chip in the composer tool row (`conversation.input.right`) with a popover for Standard/Flex, wait policy, cooldown rounds and fallback behaviour. It drives the proxy's own `config.json`, so it survives a DSH restart and needs no shipped-code change.
 - **Configuration page** — the same browser half registers the bundle row's page on the Plugins page (`plugins.row.config`, keyed `deepinfra-fusion-proxy#deepinfra-proxy`) over the shared `configForms` service, covering the host Config: `enabled`, `port`, `upstream`, `stateDir`, `serverPath`. Those are connection fields and are deliberately *not* the same thing as the runtime mode above.
@@ -287,6 +296,13 @@ bundle 插入的内容（`cordis.patch.yml`，两行按 id 定位——用户层
     - id: deepinfra-proxy-ui
       name: ./ui/lib/index.js               # 卡片宿主半边；浏览器半边 = ui 的 exports["./client"]
 ```
+
+安装依赖并不等于启用 bundle：只有当 profile 的 `package.json` 把 `deepinfra-fusion-proxy` 列进
+`dsh.profile.bundles` 时，上面那两行才会被加载。只加 `dependencies`（例如手工 `pnpm add`）会得到一个
+没有任何行、也没有代理的 profile —— 插件页会替你写 bundle 条目，手工安装则需要自己补上。
+
+共用同一个 `$DSH_HOME` 的两个 profile（便携版与桌面端指向同一个 `data` 目录）都会默认使用
+`$DSH_HOME/deepinfra-proxy` 作为状态目录。给每个 profile 设不同的 `stateDir` 与 `port` 即可互不影响。
 
 - **宿主插件** — 随 DSH 启停代理内核、异常退出按退避重启、卸载时释放端口，并注册卡片所用的同源 `/__dfusion/*` → `/__proxy/*` 桥接。
 - **切换卡片** — 会话输入区工具行（`conversation.input.right`）的 chip，弹出面板可切 Standard/Flex、等待策略、冷却轮数与 429 回退方式。它驱动代理自身的 `config.json`，重启 DSH 仍保留，且不需要改任何随包发布的代码。
