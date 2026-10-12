@@ -211,10 +211,10 @@ async function main() {
   );
   check(
     "peerDependencies pin the dsh compatibility gate",
-    pkg.peerDependencies?.["@deepseek-ai/dsh"] === ">=0.1.7-rc.1 <0.2.0",
+    pkg.peerDependencies?.["@deepseek-ai/dsh"] === ">=0.1.7-rc.1 <0.3.0",
     JSON.stringify(pkg.peerDependencies),
   );
-  check("engines.dsh is declared", pkg.engines?.dsh === ">=0.1.7-rc.1 <0.2.0", JSON.stringify(pkg.engines));
+  check("engines.dsh is declared", pkg.engines?.dsh === ">=0.1.7-rc.1 <0.3.0", JSON.stringify(pkg.engines));
 
   check("cordis.patch.yml declares two rows", layout.rows.length === 2, JSON.stringify(layout.rows));
   const hostRow = layout.rows.find((row) => row.id === ROW_ID);
