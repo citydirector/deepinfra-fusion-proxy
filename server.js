@@ -51,6 +51,11 @@ const STATE_DIR = process.env.DF_PROXY_STATE_DIR || __dirname;
 // Control-API prefix. The DSH bundle's host plugin points its /__dfusion/
 // browser bridge at this prefix, so both sides read one value here.
 const CONTROL_PREFIX = process.env.DF_PROXY_CONTROL_PREFIX || '/__proxy';
+// When set (the DSH host plugin always sets it), every control request must
+// carry it in X-DFusion-Control. Without it any web page the user opens could
+// POST to http://127.0.0.1:<port>/__proxy/config as a CORS "simple request"
+// (text/plain needs no preflight) and flip the routing; the bridge adds it.
+const CONTROL_TOKEN = process.env.DF_PROXY_CONTROL_TOKEN || '';
 
 const CONFIG_FILE = path.join(STATE_DIR, 'config.json');
 const LOCKS_FILE = path.join(STATE_DIR, 'locks.json');
@@ -125,19 +130,25 @@ function mutateLocks(fn) {
   return lockQueue;
 }
 
-/** Serialize config.json mutations (GUI writes + fallback session overrides). */
+/**
+ * Serialize config.json mutations (GUI writes + fallback session overrides).
+ * Resolves to the written config, or undefined when the write failed.
+ */
 let configQueue = Promise.resolve();
 function mutateConfig(fn) {
-  configQueue = configQueue.then(() => {
+  const run = configQueue.then(() => {
     const c = readJson(CONFIG_FILE, {});
     fn(c);
-    if (c.sessions && typeof c.sessions !== 'object') c.sessions = {};
+    if (c.sessions !== undefined && (c.sessions === null || typeof c.sessions !== 'object')) c.sessions = {};
     if (c.fallbackAction !== undefined) c.fallbackAction = normFallback(c.fallbackAction);
     writeJson(CONFIG_FILE, c);
+    return c;
   }).catch((e) => {
     console.error('[deepinfra-proxy] config write failed', e);
+    return undefined;
   });
-  return configQueue;
+  configQueue = run;
+  return run;
 }
 
 function keyOf(body) {
@@ -170,10 +181,16 @@ function readBody(req) {
 /** Map an incoming path (relative to BASE_PATH) onto the upstream base path. */
 function upstreamPath(incomingPath) {
   let tail = incomingPath;
-  if (BASE_PATH && incomingPath.startsWith(BASE_PATH)) tail = incomingPath.slice(BASE_PATH.length);
+  if (BASE_PATH && (incomingPath === BASE_PATH || incomingPath.startsWith(BASE_PATH + '/'))) tail = incomingPath.slice(BASE_PATH.length);
   if (!tail.startsWith('/')) tail = '/' + tail;
   const u = new URL(UPSTREAM);
   return (u.pathname.replace(/\/+$/, '') + tail) || '/';
+}
+/** The upstream URL's own query (if any) followed by the caller's. */
+function joinSearch(upstreamSearch, incomingSearch) {
+  const a = (upstreamSearch || '').replace(/^\?/, '');
+  const b = (incomingSearch || '').replace(/^\?/, '');
+  return a && b ? '?' + a + '&' + b : a || b ? '?' + (a || b) : '';
 }
 /** Filter hop-by-hop headers before relaying. */
 function relayRequestHeaders(headers) {
@@ -196,8 +213,12 @@ function relayResponseHeaders(headers) {
   return out;
 }
 
-/** One upstream request with a prebuilt body buffer; resolves on response headers. */
-function forwardPost(headers, incomingPath, search, bodyBuf) {
+/**
+ * One upstream request with a prebuilt body buffer; resolves on response
+ * headers. `signal` aborts the request and its response stream (the caller
+ * went away), so an abandoned generation stops instead of running to the end.
+ */
+function forwardPost(headers, incomingPath, search, bodyBuf, signal) {
   return new Promise((resolve, reject) => {
     const u = new URL(UPSTREAM);
     const mod = u.protocol === 'https:' ? https : http;
@@ -207,8 +228,9 @@ function forwardPost(headers, incomingPath, search, bodyBuf) {
       method: 'POST',
       hostname: u.hostname,
       port: u.port || (u.protocol === 'https:' ? 443 : 80),
-      path: upstreamPath(incomingPath) + u.search,
+      path: upstreamPath(incomingPath) + joinSearch(u.search, search),
       headers: upHeaders,
+      signal,
     }, (res) => {
       resolve({ status: res.statusCode, headers: res.headers, stream: res });
     });
@@ -225,11 +247,15 @@ function passThrough(req, res, incomingPath, search) {
     method: req.method,
     hostname: u.hostname,
     port: u.port || (u.protocol === 'https:' ? 443 : 80),
-    path: upstreamPath(incomingPath) + search,
+    path: upstreamPath(incomingPath) + joinSearch(u.search, search),
     headers: relayRequestHeaders(req.headers),
   }, (upRes) => {
     res.writeHead(upRes.statusCode || 502, relayResponseHeaders(upRes.headers));
     upRes.pipe(res);
+  });
+  // The caller hung up: stop the upstream request too.
+  res.on('close', () => {
+    if (!res.writableFinished) upReq.destroy();
   });
   upReq.on('error', (e) => {
     if (!res.headersSent) {
@@ -247,6 +273,9 @@ function sendJson(res, code, obj) {
 }
 
 function handleControl(req, res, url) {
+  if (CONTROL_TOKEN && req.headers['x-dfusion-control'] !== CONTROL_TOKEN) {
+    return sendJson(res, 403, { error: 'forbidden' });
+  }
   if (req.method === 'GET' && url.pathname === CONTROL_PREFIX + '/state') {
     const cfg = loadConfig();
     return sendJson(res, 200, {
@@ -264,31 +293,31 @@ function handleControl(req, res, url) {
       let b = {};
       try { b = JSON.parse(buf.toString('utf8') || '{}'); } catch { return sendJson(res, 400, { error: 'bad json' }); }
       if (url.pathname === CONTROL_PREFIX + '/config') {
-        const c = readJson(CONFIG_FILE, {});
-        if (b.defaultMode !== undefined) c.defaultMode = normMode(b.defaultMode);
-        if (b.coolLockRounds !== undefined) c.coolLockRounds = clampInt(b.coolLockRounds, 0, 99, c.coolLockRounds || 4);
-        if (b.fallbackAction !== undefined) c.fallbackAction = normFallback(b.fallbackAction);
-        if (b.defaultWait !== undefined) c.defaultWait = normWait(b.defaultWait);
-        if (b.sessions !== undefined && typeof b.sessions === 'object') {
-          const s = c.sessions && typeof c.sessions === 'object' ? { ...c.sessions } : {};
-          for (const [k, v] of Object.entries(b.sessions)) {
-            const sk = String(k);
-            if (v === null) delete s[sk];
-            else if (typeof v === 'string') s[sk] = v;
+        // One write path for config.json: the same queue the fallback uses.
+        return mutateConfig((c) => {
+          if (b.defaultMode !== undefined) c.defaultMode = normMode(b.defaultMode);
+          if (b.coolLockRounds !== undefined) c.coolLockRounds = clampInt(b.coolLockRounds, 0, 99, clampInt(c.coolLockRounds, 0, 99, 4));
+          if (b.fallbackAction !== undefined) c.fallbackAction = normFallback(b.fallbackAction);
+          if (b.defaultWait !== undefined) c.defaultWait = normWait(b.defaultWait);
+          if (b.sessions !== undefined && b.sessions !== null && typeof b.sessions === 'object') {
+            const s = c.sessions && typeof c.sessions === 'object' ? { ...c.sessions } : {};
+            for (const [k, v] of Object.entries(b.sessions)) {
+              const sk = String(k);
+              if (v === null) delete s[sk];
+              else if (typeof v === 'string') s[sk] = normMode(v);
+            }
+            c.sessions = s;
           }
-          c.sessions = s;
-        }
-        if (b.waitModes !== undefined && typeof b.waitModes === 'object') {
-          const w = c.waitModes && typeof c.waitModes === 'object' ? { ...c.waitModes } : {};
-          for (const [k, v] of Object.entries(b.waitModes)) {
-            const sk = String(k);
-            if (v === null) delete w[sk];
-            else if (typeof v === 'string') w[sk] = normWait(v);
+          if (b.waitModes !== undefined && b.waitModes !== null && typeof b.waitModes === 'object') {
+            const w = c.waitModes && typeof c.waitModes === 'object' ? { ...c.waitModes } : {};
+            for (const [k, v] of Object.entries(b.waitModes)) {
+              const sk = String(k);
+              if (v === null) delete w[sk];
+              else if (typeof v === 'string') w[sk] = normWait(v);
+            }
+            c.waitModes = w;
           }
-          c.waitModes = w;
-        }
-        writeJson(CONFIG_FILE, c);
-        return sendJson(res, 200, { ok: true, config: c });
+        }).then((saved) => (saved === undefined ? sendJson(res, 500, { error: 'config write failed' }) : sendJson(res, 200, { ok: true, config: saved })));
       }
       // unlock: remove a cooldown lock for { key | sessionId }
       const key = b.key || (b.sessionId ? String(b.sessionId) : 'default');
@@ -304,6 +333,13 @@ async function injectAndForward(req, res, url) {
   try { body = JSON.parse((await readBody(req)).toString('utf8')); } catch { return sendJson(res, 400, { error: 'bad json' }); }
   const key = keyOf(body);
   const cfg = loadConfig();
+  // The caller (DSH) cancels a turn by closing the connection. Abort the
+  // upstream request with it; piping alone leaves the upstream generation (and
+  // its billing) running to the end.
+  const abort = new AbortController();
+  res.on('close', () => {
+    if (!res.writableFinished) abort.abort();
+  });
 
   let chosenMode;
   await mutateLocks((l) => {
@@ -313,34 +349,35 @@ async function injectAndForward(req, res, url) {
       if (l[key] <= 0) delete l[key];
     }
   });
-  if (chosenMode === undefined) chosenMode = cfg.sessions[key] || cfg.defaultMode;
+  if (chosenMode === undefined) chosenMode = normMode(cfg.sessions[key] || cfg.defaultMode);
 
   // Wait policy is per-session (waitModes[key]) with a global default.
   const wait = normWait(cfg.waitModes[key] ?? cfg.defaultWait);
 
-  let attempt = await forwardPost(req.headers, url.pathname, url.search, Buffer.from(JSON.stringify(bodyForMode(body, chosenMode, wait))));
+  let attempt = await forwardPost(req.headers, url.pathname, url.search, Buffer.from(JSON.stringify(bodyForMode(body, chosenMode, wait))), abort.signal);
 
-  if (attempt.status === 429 && chosenMode !== 'standard') {
+  if (attempt.status === 429 && chosenMode !== 'standard' && !abort.signal.aborted) {
     // Capacity with fail_fast. Retry once as standard, then apply fallbackAction
     // (regardless of retry outcome, so the next request does not immediately
     // try flex again):
     //   'stay'     -> persist sessions[key] = standard (user manually returns to flex)
     //   'cooldown' -> arm the cooling lock; auto-return to flex when it expires
     try { attempt.stream.resume(); } catch { /* already flowing */ }
-    attempt = await forwardPost(req.headers, url.pathname, url.search, Buffer.from(JSON.stringify(bodyForMode(body, 'standard', wait))));
+    attempt = await forwardPost(req.headers, url.pathname, url.search, Buffer.from(JSON.stringify(bodyForMode(body, 'standard', wait))), abort.signal);
     const act = loadConfig().fallbackAction;
     if (act === 'cooldown') {
       await mutateLocks((l) => { l[key] = cfg.coolLockRounds; });
     } else {
       await mutateConfig((c) => {
-        if (c.sessions && typeof c.sessions === 'object') c.sessions[key] = 'standard';
+        if (!c.sessions || typeof c.sessions !== 'object') c.sessions = {};
+        c.sessions[key] = 'standard';
       });
     }
   }
 
   res.writeHead(attempt.status, relayResponseHeaders(attempt.headers));
   attempt.stream.pipe(res);
-  attempt.stream.on('error', () => res.end());
+  attempt.stream.on('error', () => res.destroy());
 }
 
 const server = http.createServer((req, res) => {
@@ -349,17 +386,45 @@ const server = http.createServer((req, res) => {
   const isChat = req.method === 'POST' && url.pathname.endsWith('/chat/completions');
   if (isChat) {
     injectAndForward(req, res, url).catch((e) => {
-      try { sendJson(res, 502, { error: 'upstream unavailable: ' + e.message }); } catch { /* headers already sent */ }
+      if (res.destroyed || res.headersSent) return;
+      try { sendJson(res, 502, { error: 'upstream unavailable: ' + e.message }); } catch { /* gone */ }
     });
     return;
   }
   return passThrough(req, res, url.pathname, url.search);
 });
 
-server.on('error', (e) => { console.error('[deepinfra-proxy] server error', e); process.exit(1); });
+server.on('error', (e) => {
+  // A machine-readable first word lets the DSH host plugin explain the failure.
+  if (e && e.code === 'EADDRINUSE') console.error(`[deepinfra-proxy] port-in-use ${PORT}`);
+  else console.error('[deepinfra-proxy] server error', e);
+  process.exit(1);
+});
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`[deepinfra-proxy] listening on 127.0.0.1:${PORT} -> ${UPSTREAM}`);
 });
 
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
-process.on('SIGINT', () => server.close(() => process.exit(0)));
+/**
+ * Stop: refuse new connections and end the open ones. `server.close()` alone
+ * waits for every keep-alive and streaming connection, so a stop during a
+ * long generation hung until the host's SIGKILL.
+ */
+let stopping = false;
+function shutdown() {
+  if (stopping) return;
+  stopping = true;
+  server.close(() => process.exit(0));
+  if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+  setTimeout(() => process.exit(0), 1000).unref();
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+// Started by the DSH host plugin with a stdin pipe: when DSH dies without
+// stopping us (a crash, a killed process tree on Windows), the pipe closes and
+// we leave with it instead of holding the port against the next DSH start.
+if (process.env.DF_PROXY_PARENT_PIPE === '1') {
+  process.stdin.on('end', shutdown);
+  process.stdin.on('close', shutdown);
+  process.stdin.on('error', shutdown);
+  process.stdin.resume();
+}
