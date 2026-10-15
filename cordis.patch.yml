@@ -1,21 +1,21 @@
-# The deepinfra-fusion-proxy profile bundle patch: two inserts over the profile
-# root. Rows are addressed by id, so a later bundle layer or the user's own
-# profile cordis.patch.yml can override either one (the last write wins per row).
+# The deepinfra-fusion-proxy profile bundle patch: one row over the profile
+# root. A later bundle layer or the user's own profile cordis.patch.yml can
+# override it by id (the last write wins per row).
 #
-# `./` module names resolve inside this bundle package, so the same patch works
-# for a pnpm install from a git URL and for a copy dropped into the profile by
-# hand. The UI row is the `ui/` package's host half (an empty apply, so the host
-# Loader rosters it); its browser half is the package's exports["./client"],
-# picked up by the client-module scan and injected into the composer's tool row
-# plus the bundle row's configuration page.
+# The row names the PACKAGE, not a `./` path: DSH resolves a relative name to an
+# absolute file URL, and the configuration editor copies that absolute URL into
+# the user patch on its first save — which breaks the row as soon as a portable
+# DSH folder moves. A package name resolves from the profile's node_modules
+# wherever it lives. The package is a dual-face module: "." is the host plugin
+# (which supervises server.js), "./client" the composer chip plus the row's
+# configuration page.
 #
-# The host row's id is load-bearing on DSH 0.1.7+: a plugin's settings namespace
-# IS its profile entry id, so the row id has to equal the namespace the legacy
-# `settings.yaml` section and the browser card both address. Renaming it moves
-# the settings form and stops the one-shot settings.yaml import from matching.
+# The row id is load-bearing: a plugin's settings namespace IS its profile
+# entry id, so renaming it moves the settings form and orphans saved values.
+# Releases before 2.1 named the row `./plugin/deepinfra-proxy.mjs` and shipped
+# a second `deepinfra-proxy-ui` row; the host plugin rewrites a stale user-patch
+# name on its first start.
 
 - insert:
     - id: deepinfra-proxy
-      name: ./plugin/deepinfra-proxy.mjs
-    - id: deepinfra-proxy-ui
-      name: ./ui/lib/index.js
+      name: deepinfra-fusion-proxy

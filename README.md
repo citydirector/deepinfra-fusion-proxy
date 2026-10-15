@@ -89,18 +89,21 @@ https://github.com/citydirector/deepinfra-fusion-proxy
 dsh plugin --profile web add github:citydirector/deepinfra-fusion-proxy
 ```
 
-What the bundle inserts (`cordis.patch.yml`, two id-addressed rows — a user-layer row with the same id overrides either one):
+What the bundle inserts (`cordis.patch.yml`, one id-addressed row — a user-layer row with the same id overrides it):
 
 ```yaml
 - insert:
     - id: deepinfra-proxy
-      name: ./plugin/deepinfra-proxy.mjs    # host half: supervises server.js, bridges /__dfusion/
-    - id: deepinfra-proxy-ui
-      name: ./ui/lib/index.js               # card host half; browser half = ui exports["./client"]
+      name: deepinfra-fusion-proxy   # the package: "." = host plugin, "./client" = chip + configuration page
 ```
 
-Installing the package is not the same as activating the bundle: the profile loads the two
-rows above only when its `package.json` lists `deepinfra-fusion-proxy` in `dsh.profile.bundles`.
+The row names the **package**, not a `./` path: DSH turns a relative name into an absolute file URL,
+and the configuration editor copies that URL into the user patch on its first save, which breaks as
+soon as a portable DSH folder moves. Releases before 2.1 did exactly that (and shipped a second
+`deepinfra-proxy-ui` row); 2.1 rewrites such a stale user-patch row on its first start.
+
+Installing the package is not the same as activating the bundle: the profile loads the
+row above only when its `package.json` lists `deepinfra-fusion-proxy` in `dsh.profile.bundles`.
 A `dependencies` entry alone (a manual `pnpm add`, for example) leaves the profile with no row
 and no proxy — the Plugins panel writes the bundle entry for you, a manual install must add it too.
 
@@ -110,11 +113,15 @@ distinct `stateDir` and `port` per profile to keep the instances independent.
 
 - **Host plugin** — starts/stops the proxy core with DSH, restarts it with backoff, releases the port on unload, and registers the same-origin `/__dfusion/*` → `/__proxy/*` bridge the card talks through.
 - **Toggle card** — a chip in the composer tool row (`conversation.input.right`) with a popover for Standard/Flex, wait policy, cooldown rounds and fallback behaviour. It drives the proxy's own `config.json`, so it survives a DSH restart and needs no shipped-code change.
-- **Configuration page** — the same browser half registers the bundle row's page on the Plugins page (`plugins.row.config`, keyed `deepinfra-fusion-proxy#deepinfra-proxy`) over the shared `configForms` service, covering the host Config: `enabled`, `port`, `upstream`, `stateDir`, `serverPath`. Those are connection fields and are deliberately *not* the same thing as the runtime mode above.
+- **Configuration page** — the same browser half registers the bundle row's page on the Plugins page (`plugins.row.config`, keyed `deepinfra-fusion-proxy#deepinfra-proxy`). It opens with a status card read from the authenticated `api/deepinfra-proxy/status` route: whether the core runs and, if not, why (a busy port, a missing core, a crash, with its last output), the baseURL to give llm-pi-ai, and the version. Below it, the host Config over the shared `configForms` service: `enabled`, `port`, `upstream`, `stateDir`, `serverPath`, `updateCheck`. Those are connection fields and are deliberately *not* the same thing as the runtime mode above.
+- **Updates** — the host checks the repository's `vX.Y.Z` tags 5 s after start and then every 12 hours (`updateCheck`, on by default; it never installs by itself). When a newer release exists, the page opened on the DSH machine offers *Update to vX*: it hands `github:citydirector/deepinfra-fusion-proxy#vX.Y.Z` to DSH's own plugin manager, the same call the Plugins page makes, so `package.json` and the lock file move with the code and DSH hot-swaps the plugin. A failed update shows DSH's diagnosis and a one-click rollback to the version you came from, also in a corner card when the failed version's page cannot open.
+- **Lifecycle** — the core leaves with DSH even when DSH dies without stopping it (it watches a stdin pipe), so no orphan holds the port at the next start; a replacement instance (a hot swap, an update) waits for the old core to release the port; a core that keeps failing is retried five times with backoff and then stopped, with the reason on the page, until the next save.
 - **Layout** — everything is bundle-relative: the core is `<bundle>/server.js`, the state dir defaults to `$DSH_HOME/deepinfra-proxy` (`config.json` / `locks.json`), and both are overridable through this plugin's own Config. `config/cordis.patch.example.yml` shows the profile-layer form; you normally edit the page instead.
 - **Row id is load-bearing** — on DSH 0.1.7+ a plugin's settings namespace **is** its profile entry id, so the host row stays `deepinfra-proxy` (equal to the plugin name and to the legacy `settings.yaml` section, which the one-shot migration still imports).
-- **Compatibility gate** — `peerDependencies: { "@deepseek-ai/dsh": ">=0.1.7-rc.1 <0.2.0" }` (plus a declarative `engines.dsh`). Version **2.0.0** is rc.1-only by design: `.volatile()` needs `@deepseek-ai/schemastery` ≥ 3.18.4 and the old client `settingsScope` service is gone, so there is no 0.1.6 branch.
+- **Compatibility gate** — `peerDependencies: { "@deepseek-ai/dsh": ">=0.1.7-rc.1 <0.3.0" }` (plus a declarative `engines.dsh`). Version **2.x** needs 0.1.7-rc.1 or later by design: `.volatile()` needs `@deepseek-ai/schemastery` ≥ 3.18.4 and the old client `settingsScope` service is gone, so there is no 0.1.6 branch.
 - **Point a route at it** — e.g. an `openai-completions` provider with `baseURL: http://127.0.0.1:8790/v1/openai` and `cacheRetention: long` (that is what supplies the per-session `prompt_cache_key`).
+
+**Updating.** From 2.1 on, use the page's *Update* button. To get onto 2.1 from 2.0 (which has no button), uninstall the plugin on the Plugins page and add `https://github.com/citydirector/deepinfra-fusion-proxy` again; the saved configuration stays in the profile's `cordis.patch.yml` and is migrated on the first start. Releases are `vX.Y.Z` tags; a commit without a tag is not offered.
 
 **Upgrading an existing 0.1.6 install.** A profile's `pnpm-lock.yaml` pins a git dependency to a commit, so pushing this release does not move an already-installed copy. Correct order: upgrade DSH to ≥ 0.1.7 first, then in `data/profiles/<profile>` run `pnpm add github:citydirector/deepinfra-fusion-proxy`, then toggle the bundle (Plugins page off/on, or `tools/plugin-manager.mjs enable deepinfra-fusion-proxy false/true`) so the host re-imports it. Doing it in the other order is survivable but noisy — on 0.1.6 the only symptom is a `Config.….volatile is not a function` load error (there is no compatibility gate to stop it), and reverting the pin is the fix.
 
@@ -140,7 +147,7 @@ State lives in `config.json` (auto-created with defaults on first boot):
 
 ### Control API
 
-All under `/__proxy/` (change the prefix with `DF_PROXY_CONTROL_PREFIX`):
+All under `/__proxy/` (change the prefix with `DF_PROXY_CONTROL_PREFIX`). When `DF_PROXY_CONTROL_TOKEN` is set — the DSH host plugin always sets a fresh random one — every control call must carry it in `X-DFusion-Control` (the `/__dfusion/` bridge adds it); otherwise any web page could change the routing with a cross-site "simple" POST to 127.0.0.1. A standalone `npm start` sets none, so the examples below work as written.
 
 | Endpoint | Description |
 |---|---|
@@ -174,9 +181,10 @@ npm test    # or: node test/deepinfra-proxy-bundle-test.mjs && node test/run-wai
 
 `test/deepinfra-proxy-bundle-test.mjs` covers the bundle contract (no DSH, no network — except the localhost bridge it drives itself):
 
-- **package layout** — `dsh.bundle.patch` declared, every patch row resolving to a file the `files` list ships, the `ui/` dual-face client package, the icon + `locale/{en,zh}.json` page metadata, and the host plugin anchoring on bundle-relative paths with no machine-specific absolute path baked in;
+- **package layout** — `dsh.bundle.patch` declared, the one package-named row, the dual-face root package (`"."` host plugin, `"./client"` browser half), the icon + `locale/{en,zh}.json` page metadata, and the host plugin anchoring on bundle-relative paths with no machine-specific absolute path baked in;
 - **the 0.1.7 settings contract** — the real schemastery `Config` parses into live `.get()` references with schema defaults, every field is `.volatile()`, the schema serializes for the form projection, and every field is editable in the browser half; plus static guards that the removed `ctx.settings.register` / `ctx.settings.get` / `settings/updated` APIs are gone;
-- **the live host contract** — a mocked DSH context (`webServer` route registration, `loader/volatile-update`, the optional page policy) around the real plugin, which spawns the real `server.js`; the harness drives the `/__dfusion/` bridge over HTTP and asserts that a volatile `enabled: false` commit stops the supervised child, `enabled: true` restarts it, and disposal stops it.
+- **the live host contract** — a mocked DSH context (`webServer` route registration, `loader/volatile-update`, the optional page policy) around the real plugin, which spawns the real `server.js`; the harness drives the `/__dfusion/` bridge over HTTP and asserts that a volatile `enabled: false` commit stops the supervised child, `enabled: true` restarts it, and disposal stops it;
+- **2.1 fixes** — the core refuses control calls without the token, a client hang-up cancels the upstream request, the chat query string reaches upstream, the core exits when its parent's pipe closes, a busy port shows on the status route, a replacement instance waits for the old core's port, a stale pre-2.1 user-patch row is healed, and the release-tag logic picks and pins versions correctly.
 
 `test/run-wait-test.js` spins up the bundled mock upstream (`test-mock-upstream.js`, records the received body, can force 429) and a proxy instance on throwaway ports with a throwaway state dir, then asserts:
 
@@ -198,7 +206,7 @@ pnpm install    # reads pnpm-workspace.yaml: autoInstallPeers=false keeps @deeps
 ### Security notes
 
 - The proxy relays the `Authorization` header verbatim; it stores no credentials — read the API key from an env var in your client/host.
-- Bind to `127.0.0.1` unless you deliberately want the control API exposed.
+- The core binds to `127.0.0.1` only. Under DSH its control API needs the per-start token; the `/__dfusion/` bridge runs DSH's own Host/Origin and login check first (or, in a deployment without that service, answers loopback callers only).
 - These are transport-level fields: injected request-body keys are never part of the model-visible text, so the "what the model sees is what gets logged" invariant is preserved.
 
 ### License
@@ -287,18 +295,20 @@ https://github.com/citydirector/deepinfra-fusion-proxy
 dsh plugin --profile web add github:citydirector/deepinfra-fusion-proxy
 ```
 
-bundle 插入的内容（`cordis.patch.yml`，两行按 id 定位——用户层写同一 id 即可覆盖任一行）：
+bundle 插入的内容（`cordis.patch.yml`，一行，按 id 定位——用户层写同一 id 即可覆盖）：
 
 ```yaml
 - insert:
     - id: deepinfra-proxy
-      name: ./plugin/deepinfra-proxy.mjs    # 宿主半边：托管 server.js、桥接 /__dfusion/
-    - id: deepinfra-proxy-ui
-      name: ./ui/lib/index.js               # 卡片宿主半边；浏览器半边 = ui 的 exports["./client"]
+      name: deepinfra-fusion-proxy   # 包本身："." = 宿主插件，"./client" = 切换卡片 + 配置页
 ```
 
+这一行写的是**包名**而不是 `./` 路径：DSH 会把相对路径解析成绝对 file URL，配置编辑器第一次保存时
+还会把它抄进用户 patch，绿色版 DSH 目录一搬家就失效。2.1 之前的版本正是这样（另外还多一行
+`deepinfra-proxy-ui`）；2.1 首次启动时会把用户 patch 里这种旧行改回包名。
+
 安装依赖并不等于启用 bundle：只有当 profile 的 `package.json` 把 `deepinfra-fusion-proxy` 列进
-`dsh.profile.bundles` 时，上面那两行才会被加载。只加 `dependencies`（例如手工 `pnpm add`）会得到一个
+`dsh.profile.bundles` 时，上面那一行才会被加载。只加 `dependencies`（例如手工 `pnpm add`）会得到一个
 没有任何行、也没有代理的 profile —— 插件页会替你写 bundle 条目，手工安装则需要自己补上。
 
 共用同一个 `$DSH_HOME` 的两个 profile（便携版与桌面端指向同一个 `data` 目录）都会默认使用
@@ -306,11 +316,15 @@ bundle 插入的内容（`cordis.patch.yml`，两行按 id 定位——用户层
 
 - **宿主插件** — 随 DSH 启停代理内核、异常退出按退避重启、卸载时释放端口，并注册卡片所用的同源 `/__dfusion/*` → `/__proxy/*` 桥接。
 - **切换卡片** — 会话输入区工具行（`conversation.input.right`）的 chip，弹出面板可切 Standard/Flex、等待策略、冷却轮数与 429 回退方式。它驱动代理自身的 `config.json`，重启 DSH 仍保留，且不需要改任何随包发布的代码。
-- **配置页** — 同一个浏览器半边还在插件页注册了该 bundle 行的配置页（`plugins.row.config`，key = `deepinfra-fusion-proxy#deepinfra-proxy`），走共享的 `configForms` 服务，覆盖宿主 Config 的 `enabled`、`port`、`upstream`、`stateDir`、`serverPath`。这些是**连接字段**，与上面那个运行时档位刻意分开。
+- **配置页** — 同一个浏览器半边还在插件页注册了该 bundle 行的配置页（`plugins.row.config`，key = `deepinfra-fusion-proxy#deepinfra-proxy`）。最上面是状态卡，读自带鉴权的 `api/deepinfra-proxy/status` 路由：内核是否在运行、没运行的原因（端口被占、找不到内核、意外退出，附最近输出）、给 llm-pi-ai 填的 baseURL、当前版本。下面是走共享 `configForms` 服务的宿主 Config：`enabled`、`port`、`upstream`、`stateDir`、`serverPath`、`updateCheck`。这些是**连接字段**，与上面那个运行时档位刻意分开。
+- **更新** — 宿主启动 5 秒后、之后每 12 小时检查一次仓库的 `vX.Y.Z` tag（`updateCheck`，默认开；只提示，从不自动安装）。有新版时，在 DSH 本机打开的配置页会出现「更新到 vX」：它把 `github:citydirector/deepinfra-fusion-proxy#vX.Y.Z` 交给 DSH 自己的插件管理器（就是插件页用的那个调用），`package.json` 和 lock 跟着代码一起更新，DSH 热替换插件。更新失败会显示 DSH 的诊断和一键回退到原版本；失败版本的配置页打不开时，右下角卡片里也有。
+- **生命周期** — DSH 没来得及停它就挂了，内核也会跟着退出（它盯着一条 stdin 管道），下次启动不会被孤儿进程占住端口；替换实例（热替换、更新）会等旧内核放开端口；内核反复失败时按退避重试 5 次后停下，原因显示在配置页，下次保存再重新启动。
 - **目录约定** — 全部相对 bundle：内核是 `<bundle>/server.js`，状态目录默认 `$DSH_HOME/deepinfra-proxy`（`config.json` / `locks.json`），二者都可在插件自己的 Config 里覆盖。`config/cordis.patch.example.yml` 给出 profile 层的写法；通常你直接在配置页改就行。
 - **行 id 是承重的** — 0.1.7+ 里插件的设置命名空间**就是**它的 profile entry id，所以宿主行保持 `deepinfra-proxy`（与插件名、与旧 `settings.yaml` 段名三者同名，一次性迁移仍能导入）。
-- **兼容门禁** — `peerDependencies: { "@deepseek-ai/dsh": ">=0.1.7-rc.1 <0.2.0" }`（另有声明性的 `engines.dsh`）。版本 **2.0.0** 只支持 rc.1 线：`.volatile()` 需要 `@deepseek-ai/schemastery` ≥ 3.18.4，且旧的客户端 `settingsScope` 服务已移除，因此不做 0.1.6 双兼容。
+- **兼容门禁** — `peerDependencies: { "@deepseek-ai/dsh": ">=0.1.7-rc.1 <0.3.0" }`（另有声明性的 `engines.dsh`）。**2.x** 只支持 0.1.7-rc.1 及以后：`.volatile()` 需要 `@deepseek-ai/schemastery` ≥ 3.18.4，且旧的客户端 `settingsScope` 服务已移除，因此不做 0.1.6 双兼容。
 - **把路由指过来** — 例如一个 `openai-completions` provider，`baseURL: http://127.0.0.1:8790/v1/openai` 且 `cacheRetention: long`（按会话的 `prompt_cache_key` 正是由此而来）。
+
+**更新。** 2.1 起直接用配置页的「更新」按钮。从 2.0（没有按钮）升到 2.1：在插件页卸载本插件，再添加 `https://github.com/citydirector/deepinfra-fusion-proxy`；已保存的配置留在 profile 的 `cordis.patch.yml` 里，首次启动会自动迁移。发版以 `vX.Y.Z` tag 为准，没打 tag 的提交不会被提示。
 
 **升级已有的 0.1.6 安装。** profile 的 `pnpm-lock.yaml` 会把 git 依赖钉在某个 commit 上，所以推送本版本**不会**移动已安装的副本。正确顺序：先把 DSH 升到 ≥ 0.1.7，再在 `data/profiles/<profile>` 里执行 `pnpm add github:citydirector/deepinfra-fusion-proxy`，然后 toggle 该 bundle（插件页关→开，或 `tools/plugin-manager.mjs enable deepinfra-fusion-proxy false/true`）让宿主重新 import。顺序反了也能活，只是会报错：0.1.6 上唯一症状是加载时报 `Config.….volatile is not a function`（0.1.6 没有门禁拦它），把 pin 退回去即可。
 
@@ -336,7 +350,7 @@ bundle 插入的内容（`cordis.patch.yml`，两行按 id 定位——用户层
 
 ### 控制 API
 
-全部位于 `/__proxy/` 下（可用 `DF_PROXY_CONTROL_PREFIX` 改前缀）：
+全部位于 `/__proxy/` 下（可用 `DF_PROXY_CONTROL_PREFIX` 改前缀）。设置了 `DF_PROXY_CONTROL_TOKEN` 时——DSH 宿主插件每次启动都会设一个新的随机值——所有控制请求都必须在 `X-DFusion-Control` 头里带上它（`/__dfusion/` 桥接会自动加）；否则任何网页都能用跨站的「简单请求」POST 到 127.0.0.1 改路由。单独 `npm start` 不设，下面的示例照常可用。
 
 | 端点 | 说明 |
 |---|---|
@@ -370,9 +384,10 @@ npm test    # 或：node test/deepinfra-proxy-bundle-test.mjs && node test/run-w
 
 `test/deepinfra-proxy-bundle-test.mjs` 覆盖 bundle 契约（不依赖 DSH、不联外网——只驱动它自己起的 localhost 桥接）：
 
-- **打包形态** — 声明 `dsh.bundle.patch`、每条补丁行都指向 `files` 确实会打包的文件、`ui/` 是合规的双面客户端包、图标与 `locale/{en,zh}.json` 页面元数据齐备、宿主插件只用 bundle 相对路径且没有写死机器绝对路径；
+- **打包形态** — 声明 `dsh.bundle.patch`、唯一一行写的是包名、根包是双面模块（`"."` 宿主插件，`"./client"` 浏览器半边）、图标与 `locale/{en,zh}.json` 页面元数据齐备、宿主插件只用 bundle 相对路径且没有写死机器绝对路径；
 - **0.1.7 设置契约** — 用**真** schemastery 断言 `Config({})` 返回带默认值的活引用、每个字段都是 `.volatile()`、schema 能序列化给表单投影、且每个字段在浏览器半边都可编辑；另有静态守卫确认已移除的 `ctx.settings.register` / `ctx.settings.get` / `settings/updated` 旧 API 不再出现；
-- **实机宿主契约** — 用 mock 的 DSH 上下文（`webServer` 路由注册、`loader/volatile-update`、可选的页面策略）包住真插件，由它拉起真的 `server.js`；测试台再通过 HTTP 驱动 `/__dfusion/` 桥接，断言 volatile 提交 `enabled: false` 会停掉被监管的子进程、`enabled: true` 会重启它、dispose 会停掉它。
+- **实机宿主契约** — 用 mock 的 DSH 上下文（`webServer` 路由注册、`loader/volatile-update`、可选的页面策略）包住真插件，由它拉起真的 `server.js`；测试台再通过 HTTP 驱动 `/__dfusion/` 桥接，断言 volatile 提交 `enabled: false` 会停掉被监管的子进程、`enabled: true` 会重启它、dispose 会停掉它；
+- **2.1 修复** — 内核拒绝不带 token 的控制请求、客户端断开会取消上游请求、chat 请求的查询串会带到上游、父进程管道关闭时内核退出、端口被占会出现在状态路由里、替换实例会等旧内核放开端口、2.1 之前的旧用户 patch 行会被修复、发版 tag 的选取与锁定正确。
 
 `test/run-wait-test.js` 会拉起仓库自带的 mock 上游（`test-mock-upstream.js`，记录收到的请求体、可强制 429）和一个使用一次性端口/状态目录的代理实例，然后断言：
 
@@ -394,7 +409,7 @@ pnpm install    # 读 pnpm-workspace.yaml：autoInstallPeers=false，@deepseek-a
 ### 安全说明
 
 - 代理原样透传 `Authorization` 头，不保存任何凭据——请在客户端/宿主里用环境变量读取 API key。
-- 默认绑定 `127.0.0.1`，除非你确实想让控制 API 暴露在外。
+- 内核只监听 `127.0.0.1`。在 DSH 里，控制 API 需要每次启动生成的 token；`/__dfusion/` 桥接先跑 DSH 自己的 Host/Origin 与登录校验（没有这个服务的部署里，只回应本机来源）。
 - 这些是传输层字段：注入的请求体 key 永远不会出现在模型可见文本里，因此"模型所见即所记"的不变式保持不变。
 
 ### 许可证

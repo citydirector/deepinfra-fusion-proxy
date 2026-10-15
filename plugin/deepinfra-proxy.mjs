@@ -19,6 +19,11 @@
  * here on the DSH web server, so per-session Standard/Flex switching needs no
  * DSH restart and no shipped-code change.
  *
+ * 2.1: the row names the package (not `./plugin/…`), the core's control API
+ * takes a per-start token only the bridge knows, the core leaves with DSH when
+ * DSH dies, the page reads a live status route, and the plugin checks GitHub
+ * for new releases (the page installs them through DSH's plugin manager).
+ *
  * DSH 0.1.7 configuration model (2026-09-24): `settings.yaml` is gone. A plugin
  * declares its configurable values in its own Cordis `Config`, marks the ones
  * that may change without a remount `.volatile()`, and reads them through those
@@ -30,8 +35,9 @@
  * plugin name, so the legacy `settings.yaml` section of the same name still
  * imports and the configuration page keys off `<package>#<row id>`.
  */
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { execFile, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
@@ -44,11 +50,13 @@ import z from "@deepseek-ai/schemastery";
  * `settings.yaml` import is rejected and the configuration card never appears.
  */
 export const name = "deepinfra-proxy";
+/** Package the bundle row loads this plugin by (portable across installs). */
+const PACKAGE = "deepinfra-fusion-proxy";
 
 /**
- * No required services. The configuration is this plugin's own Config, the
- * bridge waits for the `webServer` service through `ctx.inject`, and the
- * settings service is only asked for a page policy — all three optional, so the
+ * No required services. The configuration is this plugin's own Config; the
+ * bridge waits for `webServer`, the status routes for `connection`, and the
+ * settings service is only asked for a page policy — all optional, so the
  * proxy still runs (and still serves the LLM route) in a deployment that
  * composes none of them.
  */
@@ -70,9 +78,25 @@ const DEFAULT_STATE_DIR = defaultStateDir();
 const CONTROL_PREFIX = "/__proxy";
 // NB: webServer prefix paths must NOT end with '/' (matching is `path + "/"`).
 const BRIDGE_PREFIX = "/__dfusion";
+/** Header carrying the per-start control token from the bridge to the core. */
+const CONTROL_HEADER = "x-dfusion-control";
+
+/** Authenticated status route the configuration page polls. */
+export const STATUS_ROUTE = "/api/deepinfra-proxy/status";
+/** Authenticated route the page asks for an immediate update check. */
+export const UPDATE_CHECK_ROUTE = "/api/deepinfra-proxy/update-check";
+/** GitHub repository releases come from (tags `vX.Y.Z`). */
+export const UPDATE_REPOSITORY = "citydirector/deepinfra-fusion-proxy";
+const UPDATE_DELAY_MS = 5000;
+const UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000;
+const RELEASE_TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+/** A child that stays up this long counts as started: the restart backoff resets. */
+const STABLE_MS = 10000;
+const MAX_RESTARTS = 5;
 
 /** Every configurable field, in configuration-page order. */
-const FIELDS = ["enabled", "port", "upstream", "stateDir", "serverPath"];
+const FIELDS = ["enabled", "port", "upstream", "stateDir", "serverPath", "updateCheck"];
 
 /**
  * The plugin's live configuration. Every field is `.volatile()`: a change is
@@ -89,7 +113,148 @@ export const Config = z.object({
   stateDir: z.string().default(DEFAULT_STATE_DIR).volatile(),
   // The bundled proxy core; override only to point at a different build.
   serverPath: z.string().default(DEFAULT_SERVER_PATH).volatile(),
+  // Look for a newer release on GitHub (a few seconds after start, then about
+  // every 12 hours). Never installs anything by itself.
+  updateCheck: z.boolean().default(true).volatile(),
 });
+
+// ---- releases ---------------------------------------------------------------
+
+/** `[major, minor, patch]` of a `vX.Y.Z` tag, or undefined. */
+export function parseReleaseTag(tag) {
+  const match = RELEASE_TAG.exec(String(tag ?? "").trim());
+  return match === null ? undefined : [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+/** Compare `X.Y.Z` / `vX.Y.Z` like a sort comparator; unparsable sorts lowest. */
+export function compareVersions(a, b) {
+  const tag = (value) => (String(value ?? "").startsWith("v") ? String(value) : `v${value}`);
+  const pa = parseReleaseTag(tag(a));
+  const pb = parseReleaseTag(tag(b));
+  if (pa === undefined || pb === undefined) return (pa === undefined ? 0 : 1) - (pb === undefined ? 0 : 1);
+  for (let i = 0; i < 3; i += 1) if (pa[i] !== pb[i]) return pa[i] - pb[i];
+  return 0;
+}
+
+/** The highest `vX.Y.Z` tag, or undefined. */
+export function latestRelease(tags) {
+  let best;
+  for (const tag of tags ?? []) {
+    if (parseReleaseTag(tag) === undefined) continue;
+    if (best === undefined || compareVersions(tag, best) > 0) best = tag;
+  }
+  return best;
+}
+
+/**
+ * Where releases come from: the GitHub repository, or what
+ * `DSH_DIP_UPDATE_SOURCE` names (`owner/repo`, or a git URL such as
+ * `git+file:///…` to rehearse a release against a local repository).
+ */
+export function updateSource(env = process.env) {
+  const raw = String(env.DSH_DIP_UPDATE_SOURCE ?? "").trim();
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(raw)) return { kind: "github", repository: raw, spec: `github:${raw}` };
+  if (/^git(\+[a-z]+)?:\/\//i.test(raw)) return { kind: "git", url: raw.replace(/^git\+/i, ""), spec: raw };
+  return { kind: "github", repository: UPDATE_REPOSITORY, spec: `github:${UPDATE_REPOSITORY}` };
+}
+
+/** The tag-pinned install spec of one release: a new spec each release, so DSH installs it over the old one. */
+export function releaseSpec(source, tag) {
+  return `${source.spec}#${tag}`;
+}
+
+/** Tag names of a release source (GitHub: the newest 100 the API lists). */
+export async function fetchReleaseTags(source, { api = "https://api.github.com", signal } = {}) {
+  if (source.kind === "git") {
+    const output = await new Promise((resolve, reject) => {
+      execFile("git", ["ls-remote", "--tags", "--", source.url], { timeout: 20000, signal, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }, (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout);
+      });
+    });
+    return output.split("\n").map((line) => /refs\/tags\/([^\s^]+)$/.exec(line.trim())?.[1]).filter(Boolean);
+  }
+  const response = await fetch(`${api.replace(/\/+$/, "")}/repos/${source.repository}/tags?per_page=100`, {
+    headers: { accept: "application/vnd.github+json", "user-agent": PACKAGE, "x-github-api-version": "2022-11-28" },
+    signal,
+  });
+  if (!response.ok) {
+    const limited = response.status === 403 || response.status === 429;
+    throw new Error(limited ? `GitHub rate limit (HTTP ${response.status})` : `GitHub answered HTTP ${response.status}`);
+  }
+  const body = await response.json();
+  if (!Array.isArray(body)) throw new Error("GitHub answered something other than a tag list");
+  return body.map((item) => item?.name).filter((tagName) => typeof tagName === "string");
+}
+
+/** `{ state: "available", latest }` when a newer release exists, else `{ state: "current", latest? }`. */
+export function updateVerdict(tags, current) {
+  const latest = latestRelease(tags);
+  if (latest !== undefined && compareVersions(latest, current) > 0) return { state: "available", latest };
+  return { state: "current", ...(latest !== undefined ? { latest } : {}) };
+}
+
+/** This package's own version, read fresh: after a hot swap it is the new one. */
+function packageVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(BUNDLE_DIR, "package.json"), "utf8"));
+    return typeof pkg.version === "string" ? pkg.version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Rewrite a stale user-patch row name. Releases before 2.1 named the host row
+ * `./plugin/deepinfra-proxy.mjs`; DSH resolved it to an absolute file URL and
+ * the configuration editor copied that URL into the user patch on its first
+ * save. The row now names the package, and an absolute path in the user patch
+ * both overrides it and dies as soon as a portable DSH folder moves.
+ *
+ * @param text - the user patch.
+ * @returns the rewritten text, or undefined when nothing needed rewriting.
+ */
+export function healPatchText(text) {
+  let inRow = false;
+  let changed = false;
+  const lines = String(text).split("\n").map((line) => {
+    const id = /^\s*-\s+id:\s*(['"]?)([^'"\s]+)\1\s*\r?$/.exec(line);
+    if (id !== null) {
+      inRow = id[2] === name;
+      return line;
+    }
+    if (/^\s*-\s/.test(line)) inRow = false;
+    if (!inRow) return line;
+    const match = /^(\s*)name:\s*(.*?)\s*\r?$/.exec(line);
+    if (match === null) return line;
+    const value = match[2].replace(/^(['"])(.*)\1$/, "$2").replace(/\\/g, "/");
+    if (value === PACKAGE || !value.endsWith("plugin/deepinfra-proxy.mjs")) return line;
+    changed = true;
+    return `${match[1]}name: ${PACKAGE}${line.endsWith("\r") ? "\r" : ""}`;
+  });
+  return changed ? lines.join("\n") : undefined;
+}
+
+/**
+ * One stop in flight per DSH process, shared across instances AND module
+ * copies (a hot swap imports the new version as a different module while the
+ * old child still holds the port): a new start waits for it.
+ */
+const STOPPING = Symbol.for("deepinfra-fusion-proxy.stopping");
+function pendingStop() {
+  return globalThis[STOPPING] ?? Promise.resolve();
+}
+function trackStop(promise) {
+  const all = Promise.all([pendingStop(), promise]).then(() => undefined);
+  globalThis[STOPPING] = all;
+  return all;
+}
+
+/** A loopback peer (the DSH host's own machine). */
+function isLoopback(address) {
+  const a = String(address ?? "");
+  return a === "::1" || a.startsWith("127.") || a.startsWith("::ffff:127.");
+}
 
 /**
  * Mount the supervised proxy core and keep it in step with the live Config.
@@ -100,8 +265,27 @@ export const Config = z.object({
 export function apply(ctx, config) {
   let child = undefined;
   let restartTimer = undefined;
+  let stableTimer = undefined;
   let restartCount = 0;
   let disposed = false;
+  /** Per-start secret: the core accepts control calls only with it, and only the bridge has it. */
+  const controlToken = randomBytes(24).toString("base64url");
+  /**
+   * What the page shows. `state`: starting | running | disabled | error;
+   * `code` names a failure the page can explain (port-in-use, server-missing,
+   * state-dir, gave-up, crashed).
+   */
+  let status = { state: "starting" };
+  /** The last lines the core printed, for a failure's details box. */
+  const tail = [];
+
+  // Update check state (see the rap plugin, same model).
+  const source = updateSource();
+  let update = { state: "pending" };
+  let updateTimer = undefined;
+  let updateInterval = undefined;
+  let checking = undefined;
+  const updateAbort = new AbortController();
 
   // Serialize the stop/spawn cycles so rapid volatile commits cannot interleave.
   let opQueue = Promise.resolve();
@@ -116,11 +300,7 @@ export function apply(ctx, config) {
     console.log(`[deepinfra-proxy] ${line}`);
   }
 
-  /**
-   * Log a condition once: the gate below is evaluated per request, and a
-   * deployment whose `connection` service has an unexpected shape must not
-   * flood the console with one warning per poll.
-   */
+  /** Log a condition once (the gate below runs per request). */
   let gateWarned = false;
   function warnGateOnce(line) {
     if (gateWarned) return;
@@ -143,75 +323,120 @@ export function apply(ctx, config) {
     return readConfig();
   }
 
+  function fail(code, error) {
+    status = { state: "error", code, error };
+  }
+
+  function remember(text) {
+    for (const line of String(text).split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed === "") continue;
+      log(trimmed);
+      tail.push(trimmed);
+      if (tail.length > 20) tail.shift();
+      if (/listening on 127\.0\.0\.1:/.test(trimmed)) onListening();
+      const busy = /\[deepinfra-proxy\] port-in-use (\d+)/.exec(trimmed);
+      if (busy !== null) fail("port-in-use", trimmed);
+    }
+  }
+
+  function onListening() {
+    const s = currentSettings();
+    status = { state: "running", pid: child?.pid, since: new Date().toISOString() };
+    // Reset the backoff only once the child has served for a while: a core that
+    // binds and then dies at once (or never binds: a busy port) still counts.
+    clearTimeout(stableTimer);
+    stableTimer = setTimeout(() => {
+      stableTimer = undefined;
+      restartCount = 0;
+    }, STABLE_MS);
+    stableTimer.unref?.();
+    log(`serving on port ${s.port}`);
+  }
+
   function spawnChild(s) {
     if (child !== undefined || disposed) return;
     // No hidden fallback to <stateDir>/server.js: that used to resurrect the old
-    // hand-placed data\deepinfra-proxy copy whenever an override was empty, and
-    // it made "which core is actually running" unreadable off the process list.
+    // hand-placed data\deepinfra-proxy copy whenever an override was empty.
     const serverFile = s.serverPath;
     if (typeof serverFile !== "string" || serverFile.length === 0 || !existsSync(serverFile)) {
+      fail("server-missing", String(serverFile));
       log(`server.js missing: serverPath=${JSON.stringify(serverFile)}`);
       scheduleRestart();
       return;
     }
-    // spawn() below passes cwd = stateDir, and a nonexistent cwd makes spawn
-    // fail with ENOENT *named after the executable* ("spawn <node> ENOENT") —
-    // before server.js ever runs, and server.js is what creates this dir
-    // (writeJson mkdirs it). Create it here first, or a profile whose state
-    // dir is absent crash-loops on every boot.
+    // spawn() passes cwd = stateDir, and a nonexistent cwd fails with ENOENT
+    // *named after the executable* before server.js ever runs.
     try {
       mkdirSync(s.stateDir, { recursive: true });
     } catch (e) {
+      fail("state-dir", `${s.stateDir}: ${e.message}`);
       log(`stateDir unusable: ${JSON.stringify(s.stateDir)} (${e.message})`);
       scheduleRestart();
       return;
     }
+    if (status.state !== "error") status = { state: "starting" };
     let proc;
     try {
       proc = spawn(process.execPath, [serverFile], {
         cwd: s.stateDir,
         env: {
           ...process.env,
+          // DSH desktop already runs its host as Electron in Node mode and passes
+          // this down; say it explicitly so the core never opens a second app.
+          ELECTRON_RUN_AS_NODE: "1",
           DF_PROXY_PORT: String(s.port),
           DF_PROXY_UPSTREAM: s.upstream,
           DF_PROXY_STATE_DIR: s.stateDir,
           DF_PROXY_CONTROL_PREFIX: CONTROL_PREFIX,
+          DF_PROXY_CONTROL_TOKEN: controlToken,
+          DF_PROXY_PARENT_PIPE: "1",
         },
-        stdio: ["ignore", "pipe", "pipe"],
+        // stdin stays an open pipe: the core exits when it closes (DSH died).
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
       });
     } catch (e) {
+      fail("crashed", e.message);
       log(`spawn error: ${e.message}`);
       scheduleRestart();
       return;
     }
     child = proc;
-    proc.stdout.on("data", (d) => log(d.toString().trim()));
-    proc.stderr.on("data", (d) => log(d.toString().trim()));
+    proc.stdin.on("error", () => { /* the core went away first */ });
+    proc.stdout.on("data", (d) => remember(d.toString()));
+    proc.stderr.on("data", (d) => remember(d.toString()));
     proc.on("error", (e) => {
       log(`process error: ${e.message} (cwd=${JSON.stringify(s.stateDir)})`);
       if (child === proc) {
         child = undefined;
+        fail("crashed", e.message);
         scheduleRestart();
       }
     });
     proc.on("exit", (code, sig) => {
-      if (child === proc) child = undefined;
+      const mine = child === proc;
+      if (mine) child = undefined;
       log(`exited code=${code} signal=${sig}`);
-      if (code !== 0 && code !== null) scheduleRestart();
+      if (!mine) return;
+      clearTimeout(stableTimer);
+      stableTimer = undefined;
+      // Anything but a clean exit we asked for is a crash: a nonzero code, or a
+      // signal we did not send (Windows reports a killed process as code 1, POSIX
+      // as a signal with code null).
+      if (code !== 0) {
+        if (status.code !== "port-in-use") fail("crashed", `code=${code} signal=${sig}`);
+        scheduleRestart();
+      }
     });
-    // Reset the backoff only once the child really started. Resetting it
-    // eagerly made the `restartCount >= 5` give-up guard unreachable, so a
-    // permanent failure looped at "attempt 1" once a second, forever.
-    proc.on("spawn", () => {
-      restartCount = 0;
-      log(`started pid=${proc.pid} port=${s.port} -> ${s.upstream}`);
-    });
+    proc.on("spawn", () => log(`started pid=${proc.pid} port=${s.port} -> ${s.upstream}`));
   }
 
   function scheduleRestart() {
     if (disposed || restartTimer !== undefined || !currentSettings().enabled) return;
-    if (restartCount >= 5) {
-      log("giving up restart (persistent failure)");
+    if (restartCount >= MAX_RESTARTS) {
+      log("giving up restart (persistent failure); saving the configuration retries");
+      status = { ...status, state: "error", gaveUp: true };
       return;
     }
     restartCount += 1;
@@ -225,16 +450,19 @@ export function apply(ctx, config) {
 
   /** Stop the child and resolve once it is gone (SIGTERM -> SIGKILL fallback). */
   function stopChild() {
-    return new Promise((resolve) => {
-      const c = child;
-      if (c === undefined) {
+    if (restartTimer !== undefined) {
+      clearTimeout(restartTimer);
+      restartTimer = undefined;
+    }
+    clearTimeout(stableTimer);
+    stableTimer = undefined;
+    const c = child;
+    if (c === undefined) return Promise.resolve();
+    child = undefined;
+    const gone = new Promise((resolve) => {
+      if (c.exitCode !== null || c.signalCode !== null) {
         resolve();
         return;
-      }
-      child = undefined;
-      if (restartTimer !== undefined) {
-        clearTimeout(restartTimer);
-        restartTimer = undefined;
       }
       let settled = false;
       const done = () => {
@@ -244,7 +472,8 @@ export function apply(ctx, config) {
       };
       const hard = setTimeout(() => {
         try { c.kill("SIGKILL"); } catch { /* gone */ }
-        done();
+        // Give the OS a moment to release the port after the hard kill.
+        setTimeout(done, 200);
       }, 2500);
       c.once("exit", () => {
         clearTimeout(hard);
@@ -252,6 +481,7 @@ export function apply(ctx, config) {
       });
       try { c.kill("SIGTERM"); } catch { done(); }
     });
+    return trackStop(gone);
   }
 
   function applySettings() {
@@ -259,52 +489,165 @@ export function apply(ctx, config) {
       if (disposed) return;
       const s = currentSettings();
       await stopChild();
+      // A previous instance (or the version this one replaced) may still be
+      // releasing the port.
+      await pendingStop();
+      if (disposed) return;
+      // A saved configuration is a fresh start: give it the full backoff again.
+      restartCount = 0;
+      status = { state: s.enabled ? "starting" : "disabled" };
       if (s.enabled) spawnChild(s);
       else log("disabled");
+      scheduleUpdateChecks(s.updateCheck !== false);
     }).catch((e) => log(`applySettings error: ${e.message}`));
   }
+
+  // ---- update check --------------------------------------------------------
+
+  function updateDocument() {
+    const running = packageVersion();
+    const doc = { ...update, source: source.spec };
+    if (doc.state === "available" && running !== undefined && compareVersions(doc.latest, running) <= 0) doc.state = "current";
+    if (doc.stale === "available" && running !== undefined && compareVersions(doc.latest, running) <= 0) delete doc.stale;
+    if (doc.latest !== undefined) doc.spec = releaseSpec(source, doc.latest);
+    if (running !== undefined) doc.currentSpec = releaseSpec(source, `v${running}`);
+    return doc;
+  }
+
+  function checkForUpdate() {
+    if (checking !== undefined) return checking;
+    const running = packageVersion();
+    if (running === undefined) {
+      update = { state: "failed", error: "own version unreadable", checkedAt: new Date().toISOString() };
+      return Promise.resolve();
+    }
+    const previous = update;
+    update = { ...previous, state: "checking" };
+    const signal = AbortSignal.any([updateAbort.signal, AbortSignal.timeout(20000)]);
+    checking = fetchReleaseTags(source, { api: process.env.DSH_DIP_UPDATE_API || undefined, signal })
+      .then((tags) => {
+        update = { ...updateVerdict(tags, running), checkedAt: new Date().toISOString() };
+        log(`update check: ${update.state}${update.latest ? ` (newest ${update.latest}, running ${running})` : ""}`);
+      }, (error) => {
+        if (updateAbort.signal.aborted) return;
+        const message = error?.name === "TimeoutError" || error?.name === "AbortError" ? "timed out" : String(error?.message ?? error).split("\n")[0].slice(0, 200);
+        // Keep what an earlier check found: a transient failure does not hide a known release.
+        update = { ...(previous.latest !== undefined ? { latest: previous.latest } : {}), state: "failed", error: message, checkedAt: new Date().toISOString(), ...(previous.state === "available" ? { stale: "available" } : {}) };
+        log(`update check failed: ${message}`);
+      })
+      .finally(() => {
+        checking = undefined;
+      });
+    return checking;
+  }
+
+  function scheduleUpdateChecks(enabled) {
+    if (!enabled) {
+      clearTimeout(updateTimer);
+      clearInterval(updateInterval);
+      updateTimer = undefined;
+      updateInterval = undefined;
+      update = { state: "off" };
+      return;
+    }
+    if (updateTimer !== undefined || updateInterval !== undefined) return;
+    if (update.state === "off") update = { state: "pending" };
+    const delay = Number(process.env.DSH_DIP_UPDATE_DELAY_MS);
+    updateTimer = setTimeout(() => {
+      updateTimer = undefined;
+      void checkForUpdate();
+      updateInterval = setInterval(() => void checkForUpdate(), UPDATE_INTERVAL_MS);
+      updateInterval.unref?.();
+    }, Number.isFinite(delay) && delay >= 0 ? delay : UPDATE_DELAY_MS);
+    updateTimer.unref?.();
+  }
+
+  /** The status document the configuration page renders. */
+  function statusDocument() {
+    const s = currentSettings();
+    const doc = { ...status, version: packageVersion(), update: updateDocument(), updateCheck: s.updateCheck !== false };
+    doc.port = s.port;
+    doc.upstream = s.upstream;
+    doc.baseURL = `http://127.0.0.1:${s.port}/v1/openai`;
+    if (status.state === "error") doc.tail = tail.slice(-8);
+    if (status.state === "error" && status.gaveUp === undefined && restartTimer !== undefined) doc.retrying = true;
+    return doc;
+  }
+
+  function json(body) {
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    });
+  }
+
+  // The page reads status through DSH's own authenticated /api channel, so it
+  // is exactly as private as the rest of the API. Optional service.
+  ctx.inject(["connection"], (routeCtx) => {
+    const fetchRoutes = routeCtx.connection?.fetch;
+    if (typeof fetchRoutes?.register !== "function") return;
+    routeCtx.effect(() => {
+      const dispose = fetchRoutes.register({ path: STATUS_ROUTE, methods: ["GET"], requestBody: "buffered", fetch: async () => json(statusDocument()) });
+      return () => void Promise.resolve(typeof dispose === "function" ? dispose() : undefined).catch(() => {});
+    }, `${name}: status route`);
+    routeCtx.effect(() => {
+      const dispose = fetchRoutes.register({
+        path: UPDATE_CHECK_ROUTE,
+        methods: ["POST"],
+        requestBody: "buffered",
+        fetch: async () => {
+          if (currentSettings().updateCheck !== false) await checkForUpdate();
+          return json(statusDocument());
+        },
+      });
+      return () => void Promise.resolve(typeof dispose === "function" ? dispose() : undefined).catch(() => {});
+    }, `${name}: update check route`);
+  });
+
+  // ---- browser bridge ------------------------------------------------------
 
   /** Bridge: forward /__dfusion/* to the proxy control endpoint (same-origin). */
   function bridgeHandler(req, res) {
     const url = new URL(req.url, "http://" + (req.headers.host || "localhost"));
-    // BRIDGE_PREFIX has no trailing slash; matching is `path + "/"`.
     if (url.pathname !== BRIDGE_PREFIX && !url.pathname.startsWith(BRIDGE_PREFIX + "/")) {
       res.writeHead(404, { "content-type": "text/plain" });
       res.end("not found");
       return;
     }
-    // A webserver prefix route is NOT gated by the web server: `register()`
-    // only matches paths, and WebRoute carries no auth option. Run the same
+    // A webServer prefix route is NOT gated by the web server. Run the same
     // Host/Origin fence plus browser-session check DSH applies to its own /api
-    // route, or this bridge is an unauthenticated read/write endpoint for the
-    // proxy's runtime config. The service is optional (a deployment that
-    // composes no web app has no auth to reuse), so a missing one degrades to
-    // a no-op — loudly, once, rather than silently.
+    // route. Without that service (a deployment with no web app auth), fall
+    // back to loopback callers only rather than an open endpoint.
     const connection = ctx.get("connection");
-    if (connection !== undefined) {
-      if (typeof connection.requestRejection === "function") {
-        const rejection = connection.requestRejection(req);
-        if (rejection !== undefined) {
-          res.writeHead(rejection, { "cache-control": "no-store", "content-type": "text/plain; charset=utf-8" });
-          res.end(rejection === 401 ? "dsh web authentication required\n" : "forbidden\n");
-          return;
-        }
-      } else {
-        warnGateOnce("connection service exposes no requestRejection(); the /__dfusion bridge is UNGATED");
+    if (connection !== undefined && typeof connection.requestRejection === "function") {
+      const rejection = connection.requestRejection(req);
+      if (rejection !== undefined) {
+        res.writeHead(rejection, { "cache-control": "no-store", "content-type": "text/plain; charset=utf-8" });
+        res.end(rejection === 401 ? "dsh web authentication required\n" : "forbidden\n");
+        return;
+      }
+    } else {
+      warnGateOnce("no connection.requestRejection(); the /__dfusion bridge answers loopback callers only");
+      if (!isLoopback(req.socket?.remoteAddress)) {
+        res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+        res.end("forbidden\n");
+        return;
       }
     }
-    let tail = url.pathname.slice(BRIDGE_PREFIX.length);
-    if (tail.startsWith("/")) tail = tail.slice(1);
+    let rest = url.pathname.slice(BRIDGE_PREFIX.length);
+    if (rest.startsWith("/")) rest = rest.slice(1);
     const s = currentSettings();
-    const target = {
+    const headers = { ...req.headers, [CONTROL_HEADER]: controlToken };
+    delete headers.host;
+    // The browser's own cookies (the DSH login) have no business on the core.
+    delete headers.cookie;
+    const upReq = http.request({
       method: req.method,
       hostname: "127.0.0.1",
       port: s.port,
-      path: CONTROL_PREFIX + "/" + tail + url.search,
-      headers: { ...req.headers },
-    };
-    delete target.headers.host;
-    const upReq = http.request(target, (upRes) => {
+      path: CONTROL_PREFIX + "/" + rest + url.search,
+      headers,
+    }, (upRes) => {
       res.writeHead(upRes.statusCode || 502, upRes.headers);
       upRes.pipe(res);
     });
@@ -317,26 +660,40 @@ export function apply(ctx, config) {
     req.pipe(upReq);
   }
 
+  // Migrate a pre-2.1 user patch row (see healPatchText). The config editor
+  // can come up after this row, so wait for it instead of a one-shot get();
+  // once rewritten, the loader's config watcher re-applies the user's values
+  // as an ordinary volatile update.
+  ctx.inject(["configEditor"], (editorCtx) => {
+    const patchPath = editorCtx.configEditor?.documentPath;
+    if (typeof patchPath !== "string") return;
+    try {
+      const healed = healPatchText(readFileSync(patchPath, "utf8"));
+      if (healed !== undefined) {
+        writeFileSync(patchPath, healed);
+        log(`migrated the row's module name to "${PACKAGE}" in ${patchPath}`);
+      }
+    } catch (e) {
+      if (e?.code !== "ENOENT") log(`could not migrate the row's module name (${e.message})`);
+    }
+  });
+
   ctx.effect(() => {
-    log(`bundle=${BUNDLE_DIR}`);
+    log(`bundle=${BUNDLE_DIR} v${packageVersion() ?? "?"}`);
     applySettings();
     return () => {
       disposed = true;
-      if (restartTimer !== undefined) {
-        clearTimeout(restartTimer);
-        restartTimer = undefined;
-      }
-      stopChild();
+      clearTimeout(updateTimer);
+      clearInterval(updateInterval);
+      updateAbort.abort();
+      // Registered globally before returning, so a replacement instance (a hot
+      // swap, an update) waits for the port.
+      void stopChild();
     };
   });
 
-  // The bridge lives on the web server, which is an optional service here — a
-  // deployment may compose none of it. Declare it through `ctx.inject` instead
-  // of a one-shot `ctx.get()` for it while mounting: the web app provides
-  // that service and can come up *after* this row, and a single get() then
-  // missed it for the whole life of the instance. The failure is silent and
-  // total — the route is never registered, so every /__dfusion/* request 404s
-  // and the composer chip's 3s poll dies parsing an empty body.
+  // The bridge lives on the web server, an optional service that can come up
+  // *after* this row: declare it through `ctx.inject`, never a one-shot get().
   ctx.inject(["webServer"], (bridgeCtx) => {
     bridgeCtx.effect(() => {
       let off;

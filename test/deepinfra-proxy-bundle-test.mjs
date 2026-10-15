@@ -5,9 +5,9 @@
  * Three sections, no DSH and no network:
  *
  *   A. package layout — the things that silently break a remote install:
- *      dsh.bundle.patch, every row resolving inside the package, the dual-face
- *      ui/ client package, bundle-relative host paths, and the plugin-page
- *      metadata (icon + locale dictionaries).
+ *      dsh.bundle.patch, the one package-named row, the dual-face root
+ *      package ("." host plugin, "./client" browser half), bundle-relative
+ *      host paths, and the plugin-page metadata (icon + locale dictionaries).
  *   B. the 0.1.7 settings contract — the real schemastery Config must parse
  *      into live `.get()` references with schema defaults, every field must be
  *      volatile, and the browser half must expose every one of them.
@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import vm from "node:vm";
+import { spawn as spawnProcess } from "node:child_process";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_URL = pathToFileURL(join(ROOT, "plugin", "deepinfra-proxy.mjs")).href;
@@ -103,6 +104,7 @@ function createCtx(initial, options = {}) {
   const pagePolicies = [];
   const injected = [];
   const routes = [];
+  const apiRoutes = [];
   const disposers = [];
   const settingsStub = {
     configure(presentation, owner) {
@@ -122,18 +124,38 @@ function createCtx(initial, options = {}) {
     requestRejection() {
       return authRejection;
     },
+    fetch: {
+      register(route) {
+        apiRoutes.push(route);
+        return () => {};
+      },
+    },
   };
   const ctx = {
-    fiber: { entry: { options: { id: ROW_ID, name: "./plugin/deepinfra-proxy.mjs", config: undefined } } },
+    fiber: { entry: { options: { id: ROW_ID, name: BUNDLE, config: undefined } } },
     get(name) {
       if (name === "webServer") return webServerStub;
       if (name === "connection") return options.connection === false ? undefined : connectionStub;
+      if (name === "configEditor") return options.patchPath === undefined ? undefined : { documentPath: options.patchPath };
       return undefined;
     },
     inject(deps, callback) {
       injected.push([...deps]);
       if (deps.includes("settings")) {
         callback({ settings: settingsStub, effect: (fn) => { fn(); return () => {}; } });
+      }
+      if (deps.includes("connection") && options.connection !== false) {
+        callback({
+          connection: connectionStub,
+          effect: (fn) => {
+            const off = fn();
+            if (typeof off === "function") disposers.push(off);
+            return () => {};
+          },
+        });
+      }
+      if (deps.includes("configEditor") && options.patchPath !== undefined) {
+        callback({ configEditor: { documentPath: options.patchPath }, effect: (fn) => fn() });
       }
       if (deps.includes("webServer")) {
         callback({
@@ -158,6 +180,13 @@ function createCtx(initial, options = {}) {
     _refs: refs,
     _state: state,
     _routes: routes,
+    _apiRoutes: apiRoutes,
+    /** Call a registered /api route the way DSH's connection would. */
+    async _api(path) {
+      const route = apiRoutes.find((r) => r.path === path);
+      if (route === undefined) return undefined;
+      return (await route.fetch(new Request("http://dsh.internal" + path, { method: route.methods?.[0] ?? "GET" }))).json();
+    },
     _connection: connectionStub,
     /** Stand in for what DSH would answer: 401/403, or undefined to admit. */
     _setRejection(value) {
@@ -186,18 +215,15 @@ function readPackage() {
   const patchPath = typeof patchRel === "string" ? join(ROOT, patchRel) : undefined;
   const patch = patchPath !== undefined && existsSync(patchPath) ? readFileSync(patchPath, "utf8") : "";
   const rows = [...patch.matchAll(/-\s+id:\s*(\S+)\s*\n\s+name:\s*(\S+)/g)].map((m) => ({ id: m[1], name: m[2] }));
-  const ui = json("ui/package.json");
-  const clientRel = ui.exports?.["./client"];
-  const clientPath = typeof clientRel === "string" ? join(ROOT, "ui", clientRel) : undefined;
+  const clientRel = pkg.exports?.["./client"];
+  const clientPath = typeof clientRel === "string" ? join(ROOT, clientRel) : undefined;
   const clientSource = clientPath !== undefined && existsSync(clientPath) ? readFileSync(clientPath, "utf8") : "";
-  return { pkg, ui, patch, patchPath, rows, clientPath, clientSource };
+  return { pkg, patch, patchPath, rows, clientPath, clientSource };
 }
 
 async function main() {
   const layout = readPackage();
-  const { pkg, ui } = layout;
-
-  // ── A. package layout ────────────────────────────────────────────────────
+  const { pkg } = layout;
   console.log("\n-- A. package layout --");
   check("package.json declares dsh.bundle.patch", pkg.dsh?.bundle?.patch === "./cordis.patch.yml", JSON.stringify(pkg.dsh));
   check("cordis.patch.yml exists", existsSync(join(ROOT, "cordis.patch.yml")));
@@ -216,21 +242,18 @@ async function main() {
   );
   check("engines.dsh is declared", pkg.engines?.dsh === ">=0.1.7-rc.1 <0.3.0", JSON.stringify(pkg.engines));
 
-  check("cordis.patch.yml declares two rows", layout.rows.length === 2, JSON.stringify(layout.rows));
+  check("cordis.patch.yml declares one row", layout.rows.length === 1, JSON.stringify(layout.rows));
   const hostRow = layout.rows.find((row) => row.id === ROW_ID);
-  const uiRow = layout.rows.find((row) => row.id === "deepinfra-proxy-ui");
   check("bundle patch declares the host row as the settings namespace", hostRow !== undefined, JSON.stringify(layout.rows));
-  check("bundle patch declares the ui row", uiRow !== undefined, JSON.stringify(layout.rows));
-  check(
-    "every patch row resolves inside the package",
-    [hostRow, uiRow].every((row) => row !== undefined && row.name.startsWith("./") && existsSync(join(ROOT, row.name.replace(/^\.\//, "")))),
-    JSON.stringify(layout.rows),
-  );
+  check("the row names the package, not a ./ path (portable across DSH folders)", hostRow?.name === BUNDLE, JSON.stringify(hostRow));
+  check("the package's \".\" export is the host plugin", pkg.exports?.["."] === "./plugin/deepinfra-proxy.mjs" && existsSync(join(ROOT, "plugin/deepinfra-proxy.mjs")), JSON.stringify(pkg.exports?.["."]));
+  check("the package's \"./client\" export is the browser half", pkg.exports?.["./client"] === "./client/index.js" && existsSync(join(ROOT, "client/index.js")));
+  check("no separate ui/ package is left behind", !existsSync(join(ROOT, "ui")));
 
   const files = pkg.files ?? [];
   check(
     "files ships every path a remote install needs",
-    ["cordis.patch.yml", "plugin", "ui", "server.js", "config", "locale", "icon.svg", "test-mock-upstream.js", "test/run-wait-test.js", "test/deepinfra-proxy-bundle-test.mjs"].every((entry) => files.includes(entry)),
+    ["cordis.patch.yml", "plugin", "client", "server.js", "config", "locale", "icon.svg", "test-mock-upstream.js", "test/run-wait-test.js", "test/deepinfra-proxy-bundle-test.mjs"].every((entry) => files.includes(entry)),
     JSON.stringify(files),
   );
   check(
@@ -245,14 +268,14 @@ async function main() {
   check("locale dictionaries carry meta.title + meta.description", localeOk);
   check("the config example is a profile patch, not a settings document", existsSync(join(ROOT, "config/cordis.patch.example.yml")) && !existsSync(join(ROOT, "config/settings.example.yaml")));
 
-  check("ui declares dsh.client", typeof ui.dsh?.client === "object");
-  check("ui targets the web platform", ui.dsh?.client?.platform === "web");
-  check("ui declares the 0.1.7 client services it consumes", ["@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-plugin-manager", "@deepseek-ai/dsh-client-ui-conversation"].every((dep) => (ui.dsh?.client?.inject ?? []).includes(dep)), JSON.stringify(ui.dsh?.client?.inject));
-  check("ui exports ./client", ui.exports?.["./client"] === "./lib/client.js");
-  check("ui host half exists and exports apply", existsSync(join(ROOT, "ui/lib/index.js")) && /export\s*\{\s*apply\s*\}/.test(read("ui/lib/index.js")));
+  check("the package declares dsh.client", typeof pkg.dsh?.client === "object");
+  check("the client targets the web platform", pkg.dsh?.client?.platform === "web");
+  check("the client declares the services it consumes", ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-plugin-manager", "@deepseek-ai/dsh-client-ui-conversation"].every((dep) => (pkg.dsh?.client?.inject ?? []).includes(dep)), JSON.stringify(pkg.dsh?.client?.inject));
 
   const clientSource = layout.clientSource;
-  check("client bundle registers the same id as the ui package", clientSource.includes(`id: "${ui.name}"`), ui.name);
+  check("client bundle registers the package name as its module id", clientSource.includes(`id: "${pkg.name}"`), pkg.name);
+  check("client bundle installs updates through DSH's plugin manager", clientSource.includes("remote.pluginManager") && clientSource.includes("installBundle"));
+  check("client bundle reads the host status route", clientSource.includes('"api/deepinfra-proxy/status"'));
   check("client bundle uses the module loader", clientSource.includes("__ModuleLoader__.load"));
   check("client bundle keeps the composer chip on its live slot", clientSource.includes("conversation.input.right") && clientSource.includes("deepinfra-fusion-toggle"));
   check("client bundle talks to the host bridge", clientSource.includes(`${BRIDGE_PREFIX}/state`) && clientSource.includes(`${BRIDGE_PREFIX}/config`) && clientSource.includes(`${BRIDGE_PREFIX}/unlock`));
@@ -317,7 +340,7 @@ async function main() {
   const ordinary = fields.filter((field) => dict[field]?.meta?.volatile !== true);
   check("Config declares a schema", fields.length > 0, `fields=${fields.length}`);
   check("every Config field is volatile (edits never remount)", fields.length > 0 && ordinary.length === 0, `non-volatile: ${ordinary.join(", ")}`);
-  check("Config declares exactly the five connection fields", ["enabled", "port", "upstream", "stateDir", "serverPath"].every((f) => fields.includes(f)) && fields.length === 5, fields.join(", "));
+  check("Config declares exactly the six fields", ["enabled", "port", "upstream", "stateDir", "serverPath", "updateCheck"].every((f) => fields.includes(f)) && fields.length === 6, fields.join(", "));
 
   const defaults = plugin.Config({});
   check(
@@ -357,6 +380,7 @@ async function main() {
     upstream: "https://api.deepinfra.com/v1/openai",
     stateDir,
     serverPath: join(ROOT, "server.js"),
+    updateCheck: false,
   });
 
   plugin.apply(ctx, ctx._refs);
@@ -453,6 +477,7 @@ async function main() {
     upstream: "https://api.deepinfra.com/v1/openai",
     stateDir: absentDir,
     serverPath: stubKernel,
+    updateCheck: false,
   });
   plugin.apply(bootCtx, bootCtx._refs);
   await sleep(400);
@@ -475,6 +500,7 @@ async function main() {
     upstream: "https://api.deepinfra.com/v1/openai",
     stateDir: openDir,
     serverPath: join(ROOT, "server.js"),
+    updateCheck: false,
   }, { connection: false });
   plugin.apply(openCtx, openCtx._refs);
   const openRoute = openCtx._routes.find((r) => r.path === BRIDGE_PREFIX);
@@ -483,12 +509,18 @@ async function main() {
   const openPort = await freePort();
   const openServer = http.createServer((req, res) => openHandler(req, res));
   await new Promise((r) => openServer.listen(openPort, "127.0.0.1", r));
-  const openRes = await httpReq(openPort, { path: `${BRIDGE_PREFIX}/state` });
-  check("an ungated deployment is not turned into a hard failure", openRes.status !== 401 && openRes.status !== 403, `status=${openRes.status}`);
+  let openRes = { status: 0 };
+  for (let i = 0; i < 40 && openRes.status !== 200; i += 1) {
+    openRes = await httpReq(openPort, { path: `${BRIDGE_PREFIX}/state` });
+    if (openRes.status !== 200) await sleep(100);
+  }
+  check("without a connection service the bridge still serves loopback callers", openRes.status === 200, `status=${openRes.status}`);
   await new Promise((r) => openServer.close(r));
   openCtx._disposeAll();
   await sleep(250);
   rmSync(openDir, { recursive: true, force: true });
+
+  await sectionF(plugin);
 
   // ── report ───────────────────────────────────────────────────────────────
   console.log(`\n${passed} passed, ${failures.length} failed`);
@@ -502,3 +534,173 @@ main().catch((err) => {
   console.error("harness error:", err);
   process.exit(1);
 });
+
+// ── F. 2.1 fixes ─────────────────────────────────────────────────────────────
+
+/** Start server.js directly with extra environment; resolves once it listens. */
+async function startCore(env, { stdin = "ignore" } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "dip-core-"));
+  const port = await freePort();
+  const proc = spawnProcess(process.execPath, [join(ROOT, "server.js")], {
+    cwd: dir,
+    env: { ...process.env, DF_PROXY_PORT: String(port), DF_PROXY_STATE_DIR: dir, ...env },
+    stdio: [stdin, "pipe", "pipe"],
+  });
+  let out = "";
+  proc.stdout.on("data", (d) => (out += d));
+  proc.stderr.on("data", (d) => (out += d));
+  for (let i = 0; i < 50 && !out.includes("listening on"); i += 1) await sleep(100);
+  return { proc, port, dir, output: () => out };
+}
+function stopCore(core) {
+  try { core.proc.kill("SIGKILL"); } catch { /* gone */ }
+  rmSync(core.dir, { recursive: true, force: true });
+}
+
+async function sectionF(plugin) {
+  console.log("\n-- F. 2.1 fixes --");
+
+  // Control API: a web page can POST a CORS "simple request" to 127.0.0.1; the
+  // core must refuse control calls that lack the bridge's per-start token.
+  {
+    const core = await startCore({ DF_PROXY_CONTROL_TOKEN: "s3cret" });
+    const anon = await httpReq(core.port, { method: "POST", path: "/__proxy/config", headers: { "content-type": "text/plain" }, body: JSON.stringify({ defaultMode: "flex" }) });
+    check("the core refuses an unauthenticated control write", anon.status === 403, `status=${anon.status}`);
+    const anonRead = await httpReq(core.port, { path: "/__proxy/state" });
+    check("the core refuses an unauthenticated state read", anonRead.status === 403, `status=${anonRead.status}`);
+    const ok = await httpReq(core.port, { method: "POST", path: "/__proxy/config", headers: { "x-dfusion-control": "s3cret" }, body: JSON.stringify({ defaultMode: "flex" }) });
+    check("the core accepts the token", ok.status === 200 && JSON.parse(ok.body).config?.defaultMode === "flex", `status=${ok.status}`);
+    stopCore(core);
+  }
+
+  // A cancelled turn: the client hangs up mid-stream; the upstream request must end too.
+  {
+    let upstreamClosed = false;
+    let seenPath = "";
+    const upstream = http.createServer((req, res) => {
+      seenPath = req.url;
+      req.resume();
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const tick = setInterval(() => res.write("data: {}\n\n"), 50);
+      res.on("close", () => {
+        clearInterval(tick);
+        upstreamClosed = true;
+      });
+    });
+    const upPort = await freePort();
+    await new Promise((r) => upstream.listen(upPort, "127.0.0.1", r));
+    const core = await startCore({ DF_PROXY_UPSTREAM: `http://127.0.0.1:${upPort}/v1/openai` });
+    await new Promise((resolve) => {
+      const req = http.request({ hostname: "127.0.0.1", port: core.port, method: "POST", path: "/v1/openai/chat/completions?trace=1", headers: { "content-type": "application/json" } }, (res) => {
+        res.once("data", () => {
+          req.destroy();
+          resolve();
+        });
+      });
+      req.on("error", () => resolve());
+      req.end(JSON.stringify({ model: "m", stream: true, messages: [] }));
+    });
+    for (let i = 0; i < 30 && !upstreamClosed; i += 1) await sleep(100);
+    check("a client that hangs up cancels the upstream generation", upstreamClosed);
+    check("the chat request keeps its query string upstream", seenPath === "/v1/openai/chat/completions?trace=1", seenPath);
+    stopCore(core);
+    await new Promise((r) => upstream.close(r));
+  }
+
+  // DSH dies without stopping the core: the stdin pipe closes and the core leaves.
+  {
+    const core = await startCore({ DF_PROXY_PARENT_PIPE: "1" }, { stdin: "pipe" });
+    let exited = false;
+    core.proc.on("exit", () => (exited = true));
+    core.proc.stdin.end();
+    for (let i = 0; i < 30 && !exited; i += 1) await sleep(100);
+    check("the core exits when its parent's pipe closes (no orphan holding the port)", exited);
+    stopCore(core);
+  }
+
+  // A busy port is reported, not hidden behind an endless restart loop.
+  {
+    const blocker = http.createServer();
+    const busyPort = await freePort();
+    await new Promise((r) => blocker.listen(busyPort, "127.0.0.1", r));
+    const dir = mkdtempSync(join(tmpdir(), "dip-busy-"));
+    const ctx = createCtx({ enabled: true, port: busyPort, upstream: "http://127.0.0.1:9", stateDir: dir, serverPath: join(ROOT, "server.js"), updateCheck: false });
+    plugin.apply(ctx, ctx._refs);
+    let doc;
+    for (let i = 0; i < 40; i += 1) {
+      doc = await ctx._api(plugin.STATUS_ROUTE);
+      if (doc?.code === "port-in-use") break;
+      await sleep(100);
+    }
+    check("the status route explains a busy port", doc?.state === "error" && doc?.code === "port-in-use", JSON.stringify(doc));
+    check("the status carries the baseURL and version", doc?.baseURL === `http://127.0.0.1:${busyPort}/v1/openai` && doc?.version === pkgVersion(), JSON.stringify({ baseURL: doc?.baseURL, version: doc?.version }));
+    ctx._disposeAll();
+    await new Promise((r) => blocker.close(r));
+    await sleep(300);
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  // A hot swap (an update) starts the new instance while the old child still holds the port.
+  {
+    const dir = mkdtempSync(join(tmpdir(), "dip-swap-"));
+    const port = await freePort();
+    const values = { enabled: true, port, upstream: "http://127.0.0.1:9", stateDir: dir, serverPath: join(ROOT, "server.js"), updateCheck: false };
+    const first = createCtx(values);
+    plugin.apply(first, first._refs);
+    let doc;
+    for (let i = 0; i < 40 && doc?.state !== "running"; i += 1) {
+      await sleep(100);
+      doc = await first._api(plugin.STATUS_ROUTE);
+    }
+    check("the first instance serves", doc?.state === "running", JSON.stringify(doc));
+    first._disposeAll();
+    const second = createCtx(values);
+    plugin.apply(second, second._refs);
+    const seen = new Set();
+    for (let i = 0; i < 50; i += 1) {
+      await sleep(100);
+      doc = await second._api(plugin.STATUS_ROUTE);
+      seen.add(doc?.code ?? doc?.state);
+      if (doc?.state === "running") break;
+    }
+    check("the replacement waits for the old child and serves without a port clash", doc?.state === "running" && !seen.has("port-in-use"), [...seen].join(","));
+    second._disposeAll();
+    await sleep(400);
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  // Pre-2.1 user patches carry the row's absolute file URL.
+  {
+    const stale = [
+      "- id: other",
+      "  name: file:///D:/dsh/data/profiles/web/node_modules/x/plugin/deepinfra-proxy.mjs",
+      "- id: deepinfra-proxy",
+      "  name: 'file:///D:/dsh/data/profiles/web/node_modules/deepinfra-fusion-proxy/plugin/deepinfra-proxy.mjs'",
+      "  config:",
+      "    port: 8791",
+      "",
+    ].join("\r\n");
+    const healed = plugin.healPatchText(stale);
+    check("a stale absolute row name is rewritten to the package", healed !== undefined && healed.includes("- id: deepinfra-proxy\r\n  name: deepinfra-fusion-proxy\r\n  config:\r\n    port: 8791"), JSON.stringify(healed));
+    check("other rows are left alone", healed?.includes("x/plugin/deepinfra-proxy.mjs") === true);
+    check("an already healed patch is not rewritten", plugin.healPatchText(healed) === undefined);
+    const dir = mkdtempSync(join(tmpdir(), "dip-heal-"));
+    const patchPath = join(dir, "cordis.patch.yml");
+    writeFileSync(patchPath, stale);
+    const healCtx = createCtx({ enabled: false, port: 1, upstream: "x", stateDir: dir, serverPath: join(ROOT, "server.js"), updateCheck: false }, { patchPath });
+    plugin.apply(healCtx, healCtx._refs);
+    check("the plugin heals the user patch through the configEditor service", readFileSync(patchPath, "utf8").includes("  name: deepinfra-fusion-proxy\r\n"));
+    healCtx._disposeAll();
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  // Releases.
+  check("the newest vX.Y.Z tag wins by version, not by order", plugin.latestRelease(["v2.0.0", "v2.10.0", "v2.9.9", "v1.1.0", "nightly", "v3.0.0-rc.1"]) === "v2.10.0");
+  check("a newer tag is offered", plugin.updateVerdict(["v2.0.0", "v2.2.0"], "2.1.0").state === "available");
+  check("an equal tag is current", plugin.updateVerdict(["v2.1.0"], "2.1.0").state === "current");
+  check("a release installs by its tag-pinned spec", plugin.releaseSpec(plugin.updateSource({}), "v2.1.0") === "github:citydirector/deepinfra-fusion-proxy#v2.1.0");
+}
+
+function pkgVersion() {
+  return JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
+}

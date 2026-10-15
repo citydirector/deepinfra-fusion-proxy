@@ -1,12 +1,14 @@
 {
   "name": "deepinfra-fusion-proxy",
-  "version": "2.0.0",
-  "description": "Zero-dependency local reverse proxy for the DeepInfra API (injects service_tier/fail_fast, auto-falls back between Standard and Flex with per-session cooldown locks) — shipped as a DSH 0.1.7 profile bundle with its bundle-row configuration page and per-session composer toggle.",
+  "version": "2.1.0",
+  "description": "Local reverse proxy for the DeepInfra API (injects service_tier/fail_fast, falls back between Standard and Flex with per-session cooldown locks), shipped as a DSH profile bundle with a per-session composer toggle, a status-first configuration page and one-click updates.",
   "type": "commonjs",
-  "main": "server.js",
+  "main": "plugin/deepinfra-proxy.mjs",
   "icon": "icon.svg",
   "exports": {
-    ".": "./server.js",
+    ".": "./plugin/deepinfra-proxy.mjs",
+    "./client": "./client/index.js",
+    "./server.js": "./server.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json",
     "./locale/*": "./locale/*"
@@ -14,13 +16,26 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
     }
   },
   "files": [
     "server.js",
     "cordis.patch.yml",
     "plugin",
-    "ui",
+    "client",
     "config",
     "locale",
     "icon.svg",
@@ -56,5 +71,9 @@
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.4"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/citydirector/deepinfra-fusion-proxy.git"
+  }
 }
