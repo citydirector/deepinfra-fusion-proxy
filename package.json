@@ -43,6 +43,7 @@
     "test/run-wait-test.js",
     "test/deepinfra-proxy-bundle-test.mjs",
     "README.md",
+    "README.zh-CN.md",
     "LICENSE"
   ],
   "scripts": {
@@ -66,7 +67,9 @@
     "fallback",
     "llm",
     "dsh",
-    "dsh-bundle"
+    "dsh-bundle",
+    "dsh-plugin",
+    "deepseek-harness"
   ],
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.4"
