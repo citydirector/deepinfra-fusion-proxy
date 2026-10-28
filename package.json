@@ -1,6 +1,6 @@
 {
   "name": "deepinfra-fusion-proxy",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "Local reverse proxy for the DeepInfra API (injects service_tier/fail_fast, falls back between Standard and Flex with per-session cooldown locks), shipped as a DSH profile bundle with a per-session composer toggle, a status-first configuration page.",
   "type": "commonjs",
   "main": "plugin/deepinfra-proxy.mjs",
@@ -47,14 +47,14 @@
   ],
   "scripts": {
     "start": "node server.js",
-    "test": "node test/deepinfra-proxy-bundle-test.mjs && node test/run-wait-test.js"
+    "test": "node test/deepinfra-proxy-bundle-test.mjs && node test/run-wait-test.js && node --test test/compatibility.spec.mjs"
   },
   "engines": {
     "node": ">=24.9.0",
-    "dsh": ">=0.2.2-alpha.2 <0.3.0"
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh": ">=0.2.2-alpha.2 <0.3.0"
+    "@deepseek-ai/dsh": ">=0.2.1-rc.2 <0.3.0 || >=0.2.2-alpha.2 <0.3.0"
   },
   "keywords": [
     "deepinfra",
@@ -81,5 +81,8 @@
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
+  },
+  "devDependencies": {
+    "semver": "^7.8.5"
   }
 }
