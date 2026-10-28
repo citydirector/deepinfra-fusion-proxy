@@ -2,17 +2,27 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![Release](https://img.shields.io/github/v/tag/citydirector/deepinfra-fusion-proxy?sort=semver&label=release)](https://github.com/citydirector/deepinfra-fusion-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.1.7--rc.1-blue)](https://github.com/topics/dsh-plugin)
+[![Release](https://img.shields.io/github/v/tag/citydirector/deepinfra-fusion-proxy?sort=semver&label=release)](https://github.com/citydirector/deepinfra-fusion-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.2--alpha.2-blue)](https://github.com/topics/dsh-plugin)
 
-一个零依赖的 [DeepInfra](https://deepinfra.com) API 本地反向代理：把服务档位（service tier）参数变成开箱即用的开关，并实现自动 `Standard ↔ Flex` 回退与按会话的冷却锁。同时以 **DSH（DeepSeek Harness）profile bundle** 形式发布（需 DSH ≥ 0.1.7-rc.1），DSH 可直接从本仓库 URL 一次装好代理、按会话切换卡片与 bundle 行的配置页。
+一个零依赖的 [DeepInfra](https://deepinfra.com) API 本地反向代理：把服务档位（service tier）参数变成开箱即用的开关，并实现自动 `Standard ↔ Flex` 回退与按会话的冷却锁。同时以 **DSH（DeepSeek Harness）profile bundle** 形式发布（需 DSH ≥ 0.2.2-alpha.2），DSH 可从 npm 一次装好代理、按会话切换卡片与 bundle 行的配置页。
 
 插件需要 **DSH 0.1.7-rc.1 或更新**（2.x 不再兼容 0.1.6）；单独运行代理只需要 **Node.js 18+**。
+
+## npm 安装与更新
+
+需要 DSH 0.2.2-alpha.2 或更新的 0.2.x，以及 Node.js 24.9+。在 DSH「插件 → 添加插件」输入 `deepinfra-fusion-proxy`，或运行：
+
+```sh
+dsh plugin --profile web add deepinfra-fusion-proxy
+```
+
+旧版从 GitHub 安装的用户：先备份 profile 的 `cordis.patch.yml`，在插件页移除旧包并用上述 npm 包名重新添加，保持原 profile 与配置行 ID。配置仍由 profile 保存；重新添加后检查已保存的值。此后统一使用 DSH 插件页的版本列表与更新功能。插件不再轮询 GitHub、不再提供独立安装或回退按钮，旧 `updateCheck` 设置不再生效。DeepInfra 的运行数据目录保持原路径。
 
 ## 快速开始
 
 1. **安装**：侧边栏 **插件** → 添加插件，填入
    ```
-   https://github.com/citydirector/deepinfra-fusion-proxy
+   deepinfra-fusion-proxy
    ```
    装完打开开关。代理随 DSH 启动，监听 `127.0.0.1:8790`。
 2. **把路由指过来**：一个 `openai-completions` provider，`baseURL: http://127.0.0.1:8790/v1/openai`，并设 `cacheRetention: long`（每个会话的 `prompt_cache_key` 由此而来）。DeepInfra 的 API Key 照常填在 provider 上。
@@ -21,7 +31,7 @@
 命令行安装：
 
 ```bash
-dsh plugin --profile web add github:citydirector/deepinfra-fusion-proxy
+dsh plugin --profile web add deepinfra-fusion-proxy
 ```
 
 不用 DSH 时也可以单独运行（内核零依赖，不需要安装步骤）：
@@ -75,7 +85,7 @@ OpenAI 兼容客户端（baseURL → http://127.0.0.1:8790/v1/openai）
 
 ## DSH bundle 说明
 
-本仓库**本身就是**一个 bundle 包（含 `dsh.bundle.patch`），所以 DSH profile 可以直接从 GitHub URL 安装：插件页解析补丁、把该 bundle 加入 profile 的层栈，pnpm 一次性落地 `server.js`、宿主插件与切换卡片。
+本仓库**本身就是**一个 bundle 包（含 `dsh.bundle.patch`），所以 DSH profile 可以直接从 npm 安装：插件页解析补丁、把该 bundle 加入 profile 的层栈，pnpm 一次性落地 `server.js`、宿主插件与切换卡片。
 
 bundle 插入的内容（`cordis.patch.yml`，一行，按 id 定位——用户层写同一 id 即可覆盖）：
 
@@ -98,12 +108,11 @@ bundle 插入的内容（`cordis.patch.yml`，一行，按 id 定位——用户
 
 - **宿主插件** — 随 DSH 启停代理内核、异常退出按退避重启、卸载时释放端口，并注册卡片所用的同源 `/__dfusion/*` → `/__proxy/*` 桥接。
 - **切换卡片** — 会话输入区工具行（`conversation.input.right`）的 chip，弹出面板可切 Standard/Flex、等待策略、冷却轮数与 429 回退方式。它驱动代理自身的 `config.json`，重启 DSH 仍保留，且不需要改任何随包发布的代码。
-- **配置页** — 同一个浏览器半边还在插件页注册了该 bundle 行的配置页（`plugins.row.config`，key = `deepinfra-fusion-proxy#deepinfra-proxy`）。最上面是状态卡，读自带鉴权的 `api/deepinfra-proxy/status` 路由：内核是否在运行、没运行的原因（端口被占、找不到内核、意外退出，附最近输出）、给 llm-pi-ai 填的 baseURL、当前版本。下面是走共享 `configForms` 服务的宿主 Config：`enabled`、`port`、`upstream`、`stateDir`、`serverPath`、`updateCheck`。这些是**连接字段**，与上面那个运行时档位刻意分开。
-- **更新** — 宿主启动 5 秒后、之后每 12 小时检查一次仓库的 `vX.Y.Z` tag（`updateCheck`，默认开；只提示，从不自动安装）。有新版时，在 DSH 本机打开的配置页会出现「更新到 vX」：它把 `github:citydirector/deepinfra-fusion-proxy#vX.Y.Z` 交给 DSH 自己的插件管理器（就是插件页用的那个调用），`package.json` 和 lock 跟着代码一起更新，DSH 热替换插件。更新失败会显示 DSH 的诊断和一键回退到原版本；失败版本的配置页打不开时，右下角卡片里也有。
+- **配置页** — 同一个浏览器半边还在插件页注册了该 bundle 行的配置页（`plugins.row.config`，key = `deepinfra-fusion-proxy#deepinfra-proxy`）。最上面是状态卡，读自带鉴权的 `api/deepinfra-proxy/status` 路由：内核是否在运行、没运行的原因（端口被占、找不到内核、意外退出，附最近输出）、给 llm-pi-ai 填的 baseURL、当前版本。下面是走共享 `configForms` 服务的宿主 Config：`enabled`、`port`、`upstream`、`stateDir`、`serverPath`。这些是**连接字段**，与上面那个运行时档位刻意分开。
 - **生命周期** — DSH 没来得及停它就挂了，内核也会跟着退出（它盯着一条 stdin 管道），下次启动不会被孤儿进程占住端口；替换实例（热替换、更新）会等旧内核放开端口；内核反复失败时按退避重试 5 次后停下，原因显示在配置页，下次保存再重新启动。
 - **目录约定** — 全部相对 bundle：内核是 `<bundle>/server.js`，状态目录默认 `$DSH_HOME/deepinfra-proxy`（`config.json` / `locks.json`），二者都可在插件自己的 Config 里覆盖。`config/cordis.patch.example.yml` 给出 profile 层的写法；通常你直接在配置页改就行。
 - **行 id 是承重的** — 0.1.7+ 里插件的设置命名空间**就是**它的 profile entry id，所以宿主行保持 `deepinfra-proxy`（与插件名、与旧 `settings.yaml` 段名三者同名，一次性迁移仍能导入）。
-- **兼容门禁** — `peerDependencies: { "@deepseek-ai/dsh": ">=0.1.7-rc.1 <0.3.0" }`（另有声明性的 `engines.dsh`）。**2.x** 只支持 0.1.7-rc.1 及以后：`.volatile()` 需要 `@deepseek-ai/schemastery` ≥ 3.18.4，且旧的客户端 `settingsScope` 服务已移除，因此不做 0.1.6 双兼容。
+- **兼容门禁** — `peerDependencies: { "@deepseek-ai/dsh": ">=0.2.2-alpha.2 <0.3.0" }`（另有声明性的 `engines.dsh`）。**2.2+** 需要 DSH 0.2.2-alpha.2 或更新版本以使用原生 npm 更新：`.volatile()` 需要 `@deepseek-ai/schemastery` ≥ 3.18.4，且旧的客户端 `settingsScope` 服务已移除，因此不做 0.1.6 双兼容。
 - **把路由指过来** — 例如一个 `openai-completions` provider，`baseURL: http://127.0.0.1:8790/v1/openai` 且 `cacheRetention: long`（按会话的 `prompt_cache_key` 正是由此而来）。
 
 ## 配置
@@ -170,17 +179,11 @@ curl http://127.0.0.1:8790/__proxy/state
 
 ## 更新
 
-2.1 起直接用配置页的「更新到 vX」按钮（只在 DSH 本机打开的页面里出现）。发版以 `vX.Y.Z` tag 为准，没打 tag 的提交不会被提示。
+更新由 DSH「插件」页统一管理：查看 npm 版本列表、选择兼容版本并更新。插件自身不再检查 GitHub 或执行安装。发布配置见 [PUBLISHING.md](PUBLISHING.md)。
 
 ## 从旧版本升级
 
-### 2.0 → 2.1
-
-2.0 没有更新按钮：在插件页卸载本插件，再添加 `https://github.com/citydirector/deepinfra-fusion-proxy`；已保存的配置留在 profile 的 `cordis.patch.yml` 里，首次启动会自动迁移。
-
-### 0.1.6 → 2.x
-
-profile 的 `pnpm-lock.yaml` 会把 git 依赖钉在某个 commit 上，所以推送本版本**不会**移动已安装的副本。正确顺序：先把 DSH 升到 ≥ 0.1.7，再在 `data/profiles/<profile>` 里执行 `pnpm add github:citydirector/deepinfra-fusion-proxy`，然后 toggle 该 bundle（插件页关→开，或 `tools/plugin-manager.mjs enable deepinfra-fusion-proxy false/true`）让宿主重新 import。顺序反了也能活，只是会报错：0.1.6 上唯一症状是加载时报 `Config.….volatile is not a function`（0.1.6 没有门禁拦它），把 pin 退回去即可。
+从 GitHub 来源迁移的步骤见本页开头的 npm 安装说明。保留原 profile 与配置行 ID；DeepInfra 的旧绝对路径配置会在启动时修正。
 
 ## 安全
 

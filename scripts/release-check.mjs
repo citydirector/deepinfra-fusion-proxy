@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const p=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url)));
+assert.match(p.version,/^\d+\.\d+\.\d+$/);
+if(process.env.GITHUB_REF_TYPE==='tag') assert.equal(process.env.GITHUB_REF_NAME,'v'+p.version);
+assert.equal(p.repository.url,'git+https://github.com/'+process.env.GITHUB_REPOSITORY+'.git');
+assert.equal(p.publishConfig.registry,'https://registry.npmjs.org/');
+assert.ok(p.dsh.bundle.patch);
+assert.ok(fs.existsSync(p.dsh.bundle.patch));
+console.log(p.name+'@'+p.version);

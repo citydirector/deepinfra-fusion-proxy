@@ -1,7 +1,7 @@
 {
   "name": "deepinfra-fusion-proxy",
-  "version": "2.1.0",
-  "description": "Local reverse proxy for the DeepInfra API (injects service_tier/fail_fast, falls back between Standard and Flex with per-session cooldown locks), shipped as a DSH profile bundle with a per-session composer toggle, a status-first configuration page and one-click updates.",
+  "version": "2.2.1",
+  "description": "Local reverse proxy for the DeepInfra API (injects service_tier/fail_fast, falls back between Standard and Flex with per-session cooldown locks), shipped as a DSH profile bundle with a per-session composer toggle, a status-first configuration page.",
   "type": "commonjs",
   "main": "plugin/deepinfra-proxy.mjs",
   "icon": "icon.svg",
@@ -22,7 +22,6 @@
         "@deepseek-ai/dsh-api-remotes",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-plugin-manager",
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-session",
         "@deepseek-ai/dsh-client-ui-settings",
@@ -51,11 +50,11 @@
     "test": "node test/deepinfra-proxy-bundle-test.mjs && node test/run-wait-test.js"
   },
   "engines": {
-    "node": ">=18",
-    "dsh": ">=0.1.7-rc.1 <0.3.0"
+    "node": ">=24.9.0",
+    "dsh": ">=0.2.2-alpha.2 <0.3.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh": ">=0.1.7-rc.1 <0.3.0"
+    "@deepseek-ai/dsh": ">=0.2.2-alpha.2 <0.3.0"
   },
   "keywords": [
     "deepinfra",
@@ -78,5 +77,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/citydirector/deepinfra-fusion-proxy.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }

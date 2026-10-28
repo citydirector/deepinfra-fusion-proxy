@@ -2,17 +2,27 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![Release](https://img.shields.io/github/v/tag/citydirector/deepinfra-fusion-proxy?sort=semver&label=release)](https://github.com/citydirector/deepinfra-fusion-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.1.7--rc.1-blue)](https://github.com/topics/dsh-plugin)
+[![Release](https://img.shields.io/github/v/tag/citydirector/deepinfra-fusion-proxy?sort=semver&label=release)](https://github.com/citydirector/deepinfra-fusion-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.2--alpha.2-blue)](https://github.com/topics/dsh-plugin)
 
-A dependency-free local reverse proxy for the [DeepInfra](https://deepinfra.com) API that turns the service-tier knobs into first-class switches and adds automatic `Standard ↔ Flex` fallback with per-session cooldown locks. It also ships as a **DSH (DeepSeek Harness) profile bundle** (DSH ≥ 0.1.7-rc.1), so a DSH install can add the proxy, its per-session toggle card *and* the bundle row's configuration page straight from this repository URL.
+A dependency-free local reverse proxy for the [DeepInfra](https://deepinfra.com) API that turns the service-tier knobs into first-class switches and adds automatic `Standard ↔ Flex` fallback with per-session cooldown locks. It also ships as a **DSH (DeepSeek Harness) profile bundle** (DSH ≥ 0.2.2-alpha.2), so a DSH install can add the proxy, its per-session toggle card *and* the bundle row's configuration page from npm.
 
-Requires **DSH 0.1.7-rc.1 or newer** for the plugin (2.x has no 0.1.6 branch), or **Node.js 18+** to run the proxy on its own.
+Requires **DSH 0.2.2-alpha.2 or newer 0.2.x**.
+
+## npm installation and updates
+
+Requires DSH 0.2.2-alpha.2 or a newer 0.2.x and Node.js 24.9+. Enter `deepinfra-fusion-proxy` in **Plugins → Add plugin**, or run:
+
+```sh
+dsh plugin --profile web add deepinfra-fusion-proxy
+```
+
+For an existing GitHub installation, back up the profile's `cordis.patch.yml`, remove the old package in Plugins, and add the npm package above in the same profile. Keep the configuration row IDs and verify the saved settings after reinstalling. Subsequent updates use DSH's version list and update operation. The plugin no longer polls GitHub or provides its own install/rollback buttons; an old `updateCheck` setting has no effect. DeepInfra runtime data stays at its existing path.
 
 ## Quick start
 
 1. **Install**: sidebar **Plugins** → Add plugin, and give it
    ```
-   https://github.com/citydirector/deepinfra-fusion-proxy
+   deepinfra-fusion-proxy
    ```
    Switch it on. The proxy starts with DSH on `127.0.0.1:8790`.
 2. **Point a route at it**: an `openai-completions` provider with `baseURL: http://127.0.0.1:8790/v1/openai` and `cacheRetention: long` (that is what gives each session its own `prompt_cache_key`). Keep your DeepInfra API key on the provider as usual.
@@ -21,7 +31,7 @@ Requires **DSH 0.1.7-rc.1 or newer** for the plugin (2.x has no 0.1.6 branch), o
 From the command line:
 
 ```bash
-dsh plugin --profile web add github:citydirector/deepinfra-fusion-proxy
+dsh plugin --profile web add deepinfra-fusion-proxy
 ```
 
 Without DSH, run the proxy on its own (no install step, the core has no dependencies):
@@ -101,12 +111,11 @@ distinct `stateDir` and `port` per profile to keep the instances independent.
 
 - **Host plugin** — starts/stops the proxy core with DSH, restarts it with backoff, releases the port on unload, and registers the same-origin `/__dfusion/*` → `/__proxy/*` bridge the card talks through.
 - **Toggle card** — a chip in the composer tool row (`conversation.input.right`) with a popover for Standard/Flex, wait policy, cooldown rounds and fallback behaviour. It drives the proxy's own `config.json`, so it survives a DSH restart and needs no shipped-code change.
-- **Configuration page** — the same browser half registers the bundle row's page on the Plugins page (`plugins.row.config`, keyed `deepinfra-fusion-proxy#deepinfra-proxy`). It opens with a status card read from the authenticated `api/deepinfra-proxy/status` route: whether the core runs and, if not, why (a busy port, a missing core, a crash, with its last output), the baseURL to give llm-pi-ai, and the version. Below it, the host Config over the shared `configForms` service: `enabled`, `port`, `upstream`, `stateDir`, `serverPath`, `updateCheck`. Those are connection fields and are deliberately *not* the same thing as the runtime mode above.
-- **Updates** — the host checks the repository's `vX.Y.Z` tags 5 s after start and then every 12 hours (`updateCheck`, on by default; it never installs by itself). When a newer release exists, the page opened on the DSH machine offers *Update to vX*: it hands `github:citydirector/deepinfra-fusion-proxy#vX.Y.Z` to DSH's own plugin manager, the same call the Plugins page makes, so `package.json` and the lock file move with the code and DSH hot-swaps the plugin. A failed update shows DSH's diagnosis and a one-click rollback to the version you came from, also in a corner card when the failed version's page cannot open.
+- **Configuration page** — the same browser half registers the bundle row's page on the Plugins page (`plugins.row.config`, keyed `deepinfra-fusion-proxy#deepinfra-proxy`). It opens with a status card read from the authenticated `api/deepinfra-proxy/status` route: whether the core runs and, if not, why (a busy port, a missing core, a crash, with its last output), the baseURL to give llm-pi-ai, and the version. Below it, the host Config over the shared `configForms` service: `enabled`, `port`, `upstream`, `stateDir`, `serverPath`. Those are connection fields and are deliberately *not* the same thing as the runtime mode above.
 - **Lifecycle** — the core leaves with DSH even when DSH dies without stopping it (it watches a stdin pipe), so no orphan holds the port at the next start; a replacement instance (a hot swap, an update) waits for the old core to release the port; a core that keeps failing is retried five times with backoff and then stopped, with the reason on the page, until the next save.
 - **Layout** — everything is bundle-relative: the core is `<bundle>/server.js`, the state dir defaults to `$DSH_HOME/deepinfra-proxy` (`config.json` / `locks.json`), and both are overridable through this plugin's own Config. `config/cordis.patch.example.yml` shows the profile-layer form; you normally edit the page instead.
 - **Row id is load-bearing** — on DSH 0.1.7+ a plugin's settings namespace **is** its profile entry id, so the host row stays `deepinfra-proxy` (equal to the plugin name and to the legacy `settings.yaml` section, which the one-shot migration still imports).
-- **Compatibility gate** — `peerDependencies: { "@deepseek-ai/dsh": ">=0.1.7-rc.1 <0.3.0" }` (plus a declarative `engines.dsh`). Version **2.x** needs 0.1.7-rc.1 or later by design: `.volatile()` needs `@deepseek-ai/schemastery` ≥ 3.18.4 and the old client `settingsScope` service is gone, so there is no 0.1.6 branch.
+- **Compatibility gate** — `peerDependencies: { "@deepseek-ai/dsh": ">=0.2.2-alpha.2 <0.3.0" }` (plus a declarative `engines.dsh`). Version **2.2+** requires DSH 0.2.2-alpha.2 or later for native npm updates: `.volatile()` needs `@deepseek-ai/schemastery` ≥ 3.18.4 and the old client `settingsScope` service is gone, so there is no 0.1.6 branch.
 - **Point a route at it** — e.g. an `openai-completions` provider with `baseURL: http://127.0.0.1:8790/v1/openai` and `cacheRetention: long` (that is what supplies the per-session `prompt_cache_key`).
 
 ## Configuration
@@ -173,17 +182,11 @@ Point your client at `http://127.0.0.1:8790/v1/openai` and keep sending the norm
 
 ## Updating
 
-From 2.1 on, use the *Update to vX* button on the configuration page (shown on the DSH machine only). Releases are `vX.Y.Z` tags; a commit without a tag is not offered.
+Use the DSH Plugins page to list npm versions and apply a compatible update. The plugin no longer checks GitHub or performs its own installation. See [PUBLISHING.md](PUBLISHING.md) for automatic publishing.
 
 ## Upgrading from older versions
 
-### 2.0 → 2.1
-
-2.0 has no update button: uninstall the plugin on the Plugins page and add `https://github.com/citydirector/deepinfra-fusion-proxy` again; the saved configuration stays in the profile's `cordis.patch.yml` and is migrated on the first start.
-
-### 0.1.6 → 2.x
-
-A profile's `pnpm-lock.yaml` pins a git dependency to a commit, so pushing this release does not move an already-installed copy. Correct order: upgrade DSH to ≥ 0.1.7 first, then in `data/profiles/<profile>` run `pnpm add github:citydirector/deepinfra-fusion-proxy`, then toggle the bundle (Plugins page off/on, or `tools/plugin-manager.mjs enable deepinfra-fusion-proxy false/true`) so the host re-imports it. Doing it in the other order is survivable but noisy — on 0.1.6 the only symptom is a `Config.….volatile is not a function` load error (there is no compatibility gate to stop it), and reverting the pin is the fix.
+Follow the npm migration instructions above. Keep the same profile and row IDs; DeepInfra heals old absolute module paths at startup.
 
 ## Security
 

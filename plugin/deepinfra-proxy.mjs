@@ -21,8 +21,7 @@
  *
  * 2.1: the row names the package (not `./plugin/…`), the core's control API
  * takes a per-start token only the bridge knows, the core leaves with DSH when
- * DSH dies, the page reads a live status route, and the plugin checks GitHub
- * for new releases (the page installs them through DSH's plugin manager).
+ * DSH dies and the page reads a live status route. DSH manages npm updates.
  *
  * DSH 0.1.7 configuration model (2026-09-24): `settings.yaml` is gone. A plugin
  * declares its configurable values in its own Cordis `Config`, marks the ones
@@ -35,7 +34,7 @@
  * plugin name, so the legacy `settings.yaml` section of the same name still
  * imports and the configuration page keys off `<package>#<row id>`.
  */
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -83,20 +82,12 @@ const CONTROL_HEADER = "x-dfusion-control";
 
 /** Authenticated status route the configuration page polls. */
 export const STATUS_ROUTE = "/api/deepinfra-proxy/status";
-/** Authenticated route the page asks for an immediate update check. */
-export const UPDATE_CHECK_ROUTE = "/api/deepinfra-proxy/update-check";
-/** GitHub repository releases come from (tags `vX.Y.Z`). */
-export const UPDATE_REPOSITORY = "citydirector/deepinfra-fusion-proxy";
-const UPDATE_DELAY_MS = 5000;
-const UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000;
-const RELEASE_TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-
 /** A child that stays up this long counts as started: the restart backoff resets. */
 const STABLE_MS = 10000;
 const MAX_RESTARTS = 5;
 
 /** Every configurable field, in configuration-page order. */
-const FIELDS = ["enabled", "port", "upstream", "stateDir", "serverPath", "updateCheck"];
+const FIELDS = ["enabled", "port", "upstream", "stateDir", "serverPath"];
 
 /**
  * The plugin's live configuration. Every field is `.volatile()`: a change is
@@ -113,86 +104,7 @@ export const Config = z.object({
   stateDir: z.string().default(DEFAULT_STATE_DIR).volatile(),
   // The bundled proxy core; override only to point at a different build.
   serverPath: z.string().default(DEFAULT_SERVER_PATH).volatile(),
-  // Look for a newer release on GitHub (a few seconds after start, then about
-  // every 12 hours). Never installs anything by itself.
-  updateCheck: z.boolean().default(true).volatile(),
 });
-
-// ---- releases ---------------------------------------------------------------
-
-/** `[major, minor, patch]` of a `vX.Y.Z` tag, or undefined. */
-export function parseReleaseTag(tag) {
-  const match = RELEASE_TAG.exec(String(tag ?? "").trim());
-  return match === null ? undefined : [Number(match[1]), Number(match[2]), Number(match[3])];
-}
-
-/** Compare `X.Y.Z` / `vX.Y.Z` like a sort comparator; unparsable sorts lowest. */
-export function compareVersions(a, b) {
-  const tag = (value) => (String(value ?? "").startsWith("v") ? String(value) : `v${value}`);
-  const pa = parseReleaseTag(tag(a));
-  const pb = parseReleaseTag(tag(b));
-  if (pa === undefined || pb === undefined) return (pa === undefined ? 0 : 1) - (pb === undefined ? 0 : 1);
-  for (let i = 0; i < 3; i += 1) if (pa[i] !== pb[i]) return pa[i] - pb[i];
-  return 0;
-}
-
-/** The highest `vX.Y.Z` tag, or undefined. */
-export function latestRelease(tags) {
-  let best;
-  for (const tag of tags ?? []) {
-    if (parseReleaseTag(tag) === undefined) continue;
-    if (best === undefined || compareVersions(tag, best) > 0) best = tag;
-  }
-  return best;
-}
-
-/**
- * Where releases come from: the GitHub repository, or what
- * `DSH_DIP_UPDATE_SOURCE` names (`owner/repo`, or a git URL such as
- * `git+file:///…` to rehearse a release against a local repository).
- */
-export function updateSource(env = process.env) {
-  const raw = String(env.DSH_DIP_UPDATE_SOURCE ?? "").trim();
-  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(raw)) return { kind: "github", repository: raw, spec: `github:${raw}` };
-  if (/^git(\+[a-z]+)?:\/\//i.test(raw)) return { kind: "git", url: raw.replace(/^git\+/i, ""), spec: raw };
-  return { kind: "github", repository: UPDATE_REPOSITORY, spec: `github:${UPDATE_REPOSITORY}` };
-}
-
-/** The tag-pinned install spec of one release: a new spec each release, so DSH installs it over the old one. */
-export function releaseSpec(source, tag) {
-  return `${source.spec}#${tag}`;
-}
-
-/** Tag names of a release source (GitHub: the newest 100 the API lists). */
-export async function fetchReleaseTags(source, { api = "https://api.github.com", signal } = {}) {
-  if (source.kind === "git") {
-    const output = await new Promise((resolve, reject) => {
-      execFile("git", ["ls-remote", "--tags", "--", source.url], { timeout: 20000, signal, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }, (error, stdout) => {
-        if (error) reject(error);
-        else resolve(stdout);
-      });
-    });
-    return output.split("\n").map((line) => /refs\/tags\/([^\s^]+)$/.exec(line.trim())?.[1]).filter(Boolean);
-  }
-  const response = await fetch(`${api.replace(/\/+$/, "")}/repos/${source.repository}/tags?per_page=100`, {
-    headers: { accept: "application/vnd.github+json", "user-agent": PACKAGE, "x-github-api-version": "2022-11-28" },
-    signal,
-  });
-  if (!response.ok) {
-    const limited = response.status === 403 || response.status === 429;
-    throw new Error(limited ? `GitHub rate limit (HTTP ${response.status})` : `GitHub answered HTTP ${response.status}`);
-  }
-  const body = await response.json();
-  if (!Array.isArray(body)) throw new Error("GitHub answered something other than a tag list");
-  return body.map((item) => item?.name).filter((tagName) => typeof tagName === "string");
-}
-
-/** `{ state: "available", latest }` when a newer release exists, else `{ state: "current", latest? }`. */
-export function updateVerdict(tags, current) {
-  const latest = latestRelease(tags);
-  if (latest !== undefined && compareVersions(latest, current) > 0) return { state: "available", latest };
-  return { state: "current", ...(latest !== undefined ? { latest } : {}) };
-}
 
 /** This package's own version, read fresh: after a hot swap it is the new one. */
 function packageVersion() {
@@ -278,14 +190,6 @@ export function apply(ctx, config) {
   let status = { state: "starting" };
   /** The last lines the core printed, for a failure's details box. */
   const tail = [];
-
-  // Update check state (see the rap plugin, same model).
-  const source = updateSource();
-  let update = { state: "pending" };
-  let updateTimer = undefined;
-  let updateInterval = undefined;
-  let checking = undefined;
-  const updateAbort = new AbortController();
 
   // Serialize the stop/spawn cycles so rapid volatile commits cannot interleave.
   let opQueue = Promise.resolve();
@@ -498,74 +402,13 @@ export function apply(ctx, config) {
       status = { state: s.enabled ? "starting" : "disabled" };
       if (s.enabled) spawnChild(s);
       else log("disabled");
-      scheduleUpdateChecks(s.updateCheck !== false);
     }).catch((e) => log(`applySettings error: ${e.message}`));
-  }
-
-  // ---- update check --------------------------------------------------------
-
-  function updateDocument() {
-    const running = packageVersion();
-    const doc = { ...update, source: source.spec };
-    if (doc.state === "available" && running !== undefined && compareVersions(doc.latest, running) <= 0) doc.state = "current";
-    if (doc.stale === "available" && running !== undefined && compareVersions(doc.latest, running) <= 0) delete doc.stale;
-    if (doc.latest !== undefined) doc.spec = releaseSpec(source, doc.latest);
-    if (running !== undefined) doc.currentSpec = releaseSpec(source, `v${running}`);
-    return doc;
-  }
-
-  function checkForUpdate() {
-    if (checking !== undefined) return checking;
-    const running = packageVersion();
-    if (running === undefined) {
-      update = { state: "failed", error: "own version unreadable", checkedAt: new Date().toISOString() };
-      return Promise.resolve();
-    }
-    const previous = update;
-    update = { ...previous, state: "checking" };
-    const signal = AbortSignal.any([updateAbort.signal, AbortSignal.timeout(20000)]);
-    checking = fetchReleaseTags(source, { api: process.env.DSH_DIP_UPDATE_API || undefined, signal })
-      .then((tags) => {
-        update = { ...updateVerdict(tags, running), checkedAt: new Date().toISOString() };
-        log(`update check: ${update.state}${update.latest ? ` (newest ${update.latest}, running ${running})` : ""}`);
-      }, (error) => {
-        if (updateAbort.signal.aborted) return;
-        const message = error?.name === "TimeoutError" || error?.name === "AbortError" ? "timed out" : String(error?.message ?? error).split("\n")[0].slice(0, 200);
-        // Keep what an earlier check found: a transient failure does not hide a known release.
-        update = { ...(previous.latest !== undefined ? { latest: previous.latest } : {}), state: "failed", error: message, checkedAt: new Date().toISOString(), ...(previous.state === "available" ? { stale: "available" } : {}) };
-        log(`update check failed: ${message}`);
-      })
-      .finally(() => {
-        checking = undefined;
-      });
-    return checking;
-  }
-
-  function scheduleUpdateChecks(enabled) {
-    if (!enabled) {
-      clearTimeout(updateTimer);
-      clearInterval(updateInterval);
-      updateTimer = undefined;
-      updateInterval = undefined;
-      update = { state: "off" };
-      return;
-    }
-    if (updateTimer !== undefined || updateInterval !== undefined) return;
-    if (update.state === "off") update = { state: "pending" };
-    const delay = Number(process.env.DSH_DIP_UPDATE_DELAY_MS);
-    updateTimer = setTimeout(() => {
-      updateTimer = undefined;
-      void checkForUpdate();
-      updateInterval = setInterval(() => void checkForUpdate(), UPDATE_INTERVAL_MS);
-      updateInterval.unref?.();
-    }, Number.isFinite(delay) && delay >= 0 ? delay : UPDATE_DELAY_MS);
-    updateTimer.unref?.();
   }
 
   /** The status document the configuration page renders. */
   function statusDocument() {
     const s = currentSettings();
-    const doc = { ...status, version: packageVersion(), update: updateDocument(), updateCheck: s.updateCheck !== false };
+    const doc = { ...status, version: packageVersion() };
     doc.port = s.port;
     doc.upstream = s.upstream;
     doc.baseURL = `http://127.0.0.1:${s.port}/v1/openai`;
@@ -590,18 +433,6 @@ export function apply(ctx, config) {
       const dispose = fetchRoutes.register({ path: STATUS_ROUTE, methods: ["GET"], requestBody: "buffered", fetch: async () => json(statusDocument()) });
       return () => void Promise.resolve(typeof dispose === "function" ? dispose() : undefined).catch(() => {});
     }, `${name}: status route`);
-    routeCtx.effect(() => {
-      const dispose = fetchRoutes.register({
-        path: UPDATE_CHECK_ROUTE,
-        methods: ["POST"],
-        requestBody: "buffered",
-        fetch: async () => {
-          if (currentSettings().updateCheck !== false) await checkForUpdate();
-          return json(statusDocument());
-        },
-      });
-      return () => void Promise.resolve(typeof dispose === "function" ? dispose() : undefined).catch(() => {});
-    }, `${name}: update check route`);
   });
 
   // ---- browser bridge ------------------------------------------------------
@@ -683,9 +514,6 @@ export function apply(ctx, config) {
     applySettings();
     return () => {
       disposed = true;
-      clearTimeout(updateTimer);
-      clearInterval(updateInterval);
-      updateAbort.abort();
       // Registered globally before returning, so a replacement instance (a hot
       // swap, an update) waits for the port.
       void stopChild();
