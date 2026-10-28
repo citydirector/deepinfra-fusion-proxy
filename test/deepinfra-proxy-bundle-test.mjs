@@ -237,10 +237,10 @@ async function main() {
   );
   check(
     "peerDependencies pin the dsh compatibility gate",
-    pkg.peerDependencies?.["@deepseek-ai/dsh"] === ">=0.1.7-rc.1 <0.3.0",
+    pkg.peerDependencies?.["@deepseek-ai/dsh"] === ">=0.2.2-alpha.2 <0.3.0",
     JSON.stringify(pkg.peerDependencies),
   );
-  check("engines.dsh is declared", pkg.engines?.dsh === ">=0.1.7-rc.1 <0.3.0", JSON.stringify(pkg.engines));
+  check("engines.dsh is declared", pkg.engines?.dsh === ">=0.2.2-alpha.2 <0.3.0", JSON.stringify(pkg.engines));
 
   check("cordis.patch.yml declares one row", layout.rows.length === 1, JSON.stringify(layout.rows));
   const hostRow = layout.rows.find((row) => row.id === ROW_ID);
@@ -270,11 +270,11 @@ async function main() {
 
   check("the package declares dsh.client", typeof pkg.dsh?.client === "object");
   check("the client targets the web platform", pkg.dsh?.client?.platform === "web");
-  check("the client declares the services it consumes", ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-plugin-manager", "@deepseek-ai/dsh-client-ui-conversation"].every((dep) => (pkg.dsh?.client?.inject ?? []).includes(dep)), JSON.stringify(pkg.dsh?.client?.inject));
+  check("the client declares the services it consumes", ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-conversation"].every((dep) => (pkg.dsh?.client?.inject ?? []).includes(dep)), JSON.stringify(pkg.dsh?.client?.inject));
 
   const clientSource = layout.clientSource;
   check("client bundle registers the package name as its module id", clientSource.includes(`id: "${pkg.name}"`), pkg.name);
-  check("client bundle installs updates through DSH's plugin manager", clientSource.includes("remote.pluginManager") && clientSource.includes("installBundle"));
+  check("updates belong to the DSH Plugins page", !clientSource.includes("installBundle") && !clientSource.includes("update-check"));
   check("client bundle reads the host status route", clientSource.includes('"api/deepinfra-proxy/status"'));
   check("client bundle uses the module loader", clientSource.includes("__ModuleLoader__.load"));
   check("client bundle keeps the composer chip on its live slot", clientSource.includes("conversation.input.right") && clientSource.includes("deepinfra-fusion-toggle"));
@@ -340,7 +340,7 @@ async function main() {
   const ordinary = fields.filter((field) => dict[field]?.meta?.volatile !== true);
   check("Config declares a schema", fields.length > 0, `fields=${fields.length}`);
   check("every Config field is volatile (edits never remount)", fields.length > 0 && ordinary.length === 0, `non-volatile: ${ordinary.join(", ")}`);
-  check("Config declares exactly the six fields", ["enabled", "port", "upstream", "stateDir", "serverPath", "updateCheck"].every((f) => fields.includes(f)) && fields.length === 6, fields.join(", "));
+  check("Config declares exactly the five fields", ["enabled", "port", "upstream", "stateDir", "serverPath"].every((f) => fields.includes(f)) && fields.length === 5, fields.join(", "));
 
   const defaults = plugin.Config({});
   check(
@@ -380,7 +380,6 @@ async function main() {
     upstream: "https://api.deepinfra.com/v1/openai",
     stateDir,
     serverPath: join(ROOT, "server.js"),
-    updateCheck: false,
   });
 
   plugin.apply(ctx, ctx._refs);
@@ -477,7 +476,6 @@ async function main() {
     upstream: "https://api.deepinfra.com/v1/openai",
     stateDir: absentDir,
     serverPath: stubKernel,
-    updateCheck: false,
   });
   plugin.apply(bootCtx, bootCtx._refs);
   await sleep(400);
@@ -500,7 +498,6 @@ async function main() {
     upstream: "https://api.deepinfra.com/v1/openai",
     stateDir: openDir,
     serverPath: join(ROOT, "server.js"),
-    updateCheck: false,
   }, { connection: false });
   plugin.apply(openCtx, openCtx._refs);
   const openRoute = openCtx._routes.find((r) => r.path === BRIDGE_PREFIX);
@@ -552,9 +549,15 @@ async function startCore(env, { stdin = "ignore" } = {}) {
   for (let i = 0; i < 50 && !out.includes("listening on"); i += 1) await sleep(100);
   return { proc, port, dir, output: () => out };
 }
-function stopCore(core) {
-  try { core.proc.kill("SIGKILL"); } catch { /* gone */ }
-  rmSync(core.dir, { recursive: true, force: true });
+async function stopCore(core) {
+  // Windows retains the child's working directory until process exit.
+  if (core.proc.exitCode === null && core.proc.signalCode === null) {
+    await new Promise((resolve) => {
+      core.proc.once("exit", resolve);
+      core.proc.kill("SIGKILL");
+    });
+  }
+  rmSync(core.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
 async function sectionF(plugin) {
@@ -570,7 +573,7 @@ async function sectionF(plugin) {
     check("the core refuses an unauthenticated state read", anonRead.status === 403, `status=${anonRead.status}`);
     const ok = await httpReq(core.port, { method: "POST", path: "/__proxy/config", headers: { "x-dfusion-control": "s3cret" }, body: JSON.stringify({ defaultMode: "flex" }) });
     check("the core accepts the token", ok.status === 200 && JSON.parse(ok.body).config?.defaultMode === "flex", `status=${ok.status}`);
-    stopCore(core);
+    await stopCore(core);
   }
 
   // A cancelled turn: the client hangs up mid-stream; the upstream request must end too.
@@ -603,7 +606,7 @@ async function sectionF(plugin) {
     for (let i = 0; i < 30 && !upstreamClosed; i += 1) await sleep(100);
     check("a client that hangs up cancels the upstream generation", upstreamClosed);
     check("the chat request keeps its query string upstream", seenPath === "/v1/openai/chat/completions?trace=1", seenPath);
-    stopCore(core);
+    await stopCore(core);
     await new Promise((r) => upstream.close(r));
   }
 
@@ -615,7 +618,7 @@ async function sectionF(plugin) {
     core.proc.stdin.end();
     for (let i = 0; i < 30 && !exited; i += 1) await sleep(100);
     check("the core exits when its parent's pipe closes (no orphan holding the port)", exited);
-    stopCore(core);
+    await stopCore(core);
   }
 
   // A busy port is reported, not hidden behind an endless restart loop.
@@ -624,7 +627,7 @@ async function sectionF(plugin) {
     const busyPort = await freePort();
     await new Promise((r) => blocker.listen(busyPort, "127.0.0.1", r));
     const dir = mkdtempSync(join(tmpdir(), "dip-busy-"));
-    const ctx = createCtx({ enabled: true, port: busyPort, upstream: "http://127.0.0.1:9", stateDir: dir, serverPath: join(ROOT, "server.js"), updateCheck: false });
+    const ctx = createCtx({ enabled: true, port: busyPort, upstream: "http://127.0.0.1:9", stateDir: dir, serverPath: join(ROOT, "server.js") });
     plugin.apply(ctx, ctx._refs);
     let doc;
     for (let i = 0; i < 40; i += 1) {
@@ -644,7 +647,7 @@ async function sectionF(plugin) {
   {
     const dir = mkdtempSync(join(tmpdir(), "dip-swap-"));
     const port = await freePort();
-    const values = { enabled: true, port, upstream: "http://127.0.0.1:9", stateDir: dir, serverPath: join(ROOT, "server.js"), updateCheck: false };
+    const values = { enabled: true, port, upstream: "http://127.0.0.1:9", stateDir: dir, serverPath: join(ROOT, "server.js") };
     const first = createCtx(values);
     plugin.apply(first, first._refs);
     let doc;
@@ -687,18 +690,14 @@ async function sectionF(plugin) {
     const dir = mkdtempSync(join(tmpdir(), "dip-heal-"));
     const patchPath = join(dir, "cordis.patch.yml");
     writeFileSync(patchPath, stale);
-    const healCtx = createCtx({ enabled: false, port: 1, upstream: "x", stateDir: dir, serverPath: join(ROOT, "server.js"), updateCheck: false }, { patchPath });
+    const healCtx = createCtx({ enabled: false, port: 1, upstream: "x", stateDir: dir, serverPath: join(ROOT, "server.js") }, { patchPath });
     plugin.apply(healCtx, healCtx._refs);
     check("the plugin heals the user patch through the configEditor service", readFileSync(patchPath, "utf8").includes("  name: deepinfra-fusion-proxy\r\n"));
     healCtx._disposeAll();
     rmSync(dir, { recursive: true, force: true });
   }
 
-  // Releases.
-  check("the newest vX.Y.Z tag wins by version, not by order", plugin.latestRelease(["v2.0.0", "v2.10.0", "v2.9.9", "v1.1.0", "nightly", "v3.0.0-rc.1"]) === "v2.10.0");
-  check("a newer tag is offered", plugin.updateVerdict(["v2.0.0", "v2.2.0"], "2.1.0").state === "available");
-  check("an equal tag is current", plugin.updateVerdict(["v2.1.0"], "2.1.0").state === "current");
-  check("a release installs by its tag-pinned spec", plugin.releaseSpec(plugin.updateSource({}), "v2.1.0") === "github:citydirector/deepinfra-fusion-proxy#v2.1.0");
+
 }
 
 function pkgVersion() {

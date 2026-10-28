@@ -1,0 +1,41 @@
+name: Publish npm
+on:
+  push:
+    branches: [main]
+    paths: [package.json]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install -g npm@11
+      - run: node scripts/release-check.mjs
+      - run: npm ci --ignore-scripts --legacy-peer-deps
+      - run: npm test
+      - run: npm pack --dry-run
+      - name: Publish with npm trusted publishing
+        shell: bash
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version --json > published.json 2> registry-error.txt; then
+            echo "$name@$version is already published"
+          elif grep -q 'E404' registry-error.txt; then
+            npm publish --provenance --access public
+          else
+            cat registry-error.txt >&2
+            exit 1
+          fi
