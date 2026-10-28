@@ -1,6 +1,6 @@
 {
   "name": "deepinfra-fusion-proxy",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Local reverse proxy for the DeepInfra API (injects service_tier/fail_fast, falls back between Standard and Flex with per-session cooldown locks), shipped as a DSH profile bundle with a per-session composer toggle, a status-first configuration page.",
   "type": "commonjs",
   "main": "plugin/deepinfra-proxy.mjs",
