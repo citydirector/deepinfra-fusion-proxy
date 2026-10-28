@@ -2,15 +2,17 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![Release](https://img.shields.io/github/v/tag/citydirector/deepinfra-fusion-proxy?sort=semver&label=release)](https://github.com/citydirector/deepinfra-fusion-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.2--alpha.2-blue)](https://github.com/topics/dsh-plugin)
+[![Release](https://img.shields.io/github/v/tag/citydirector/deepinfra-fusion-proxy?sort=semver&label=release)](https://github.com/citydirector/deepinfra-fusion-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.1--rc.2-blue)](https://github.com/topics/dsh-plugin)
 
-A dependency-free local reverse proxy for the [DeepInfra](https://deepinfra.com) API that turns the service-tier knobs into first-class switches and adds automatic `Standard ↔ Flex` fallback with per-session cooldown locks. It also ships as a **DSH (DeepSeek Harness) profile bundle** (DSH ≥ 0.2.2-alpha.2), so a DSH install can add the proxy, its per-session toggle card *and* the bundle row's configuration page from npm.
+A dependency-free local reverse proxy for the [DeepInfra](https://deepinfra.com) API that turns the service-tier knobs into first-class switches and adds automatic `Standard ↔ Flex` fallback with per-session cooldown locks. It also ships as a **DSH (DeepSeek Harness) profile bundle** (DSH ≥ 0.2.1-rc.2), so a DSH install can add the proxy, its per-session toggle card *and* the bundle row's configuration page from npm.
 
-Requires **DSH 0.2.2-alpha.2 or newer 0.2.x**.
+Requires **DSH 0.2.1-rc.2 or newer 0.2.x**.
 
 ## npm installation and updates
 
-Requires DSH 0.2.2-alpha.2 or a newer 0.2.x and Node.js 24.9+. Enter `deepinfra-fusion-proxy` in **Plugins → Add plugin**, or run:
+The plugin runs on DSH 0.2.1, including 0.2.1-rc.3. Use the Plugins page version list when your DSH provides it. Otherwise, stop DSH and run `dsh plugin --profile web add deepinfra-fusion-proxy@latest` (use `desktop` instead of `web` for Desktop), then restart. GitHub Actions publishing does not require an alpha DSH runtime.
+
+Requires DSH 0.2.1-rc.2 or a newer 0.2.x and Node.js 24.9+. Enter `deepinfra-fusion-proxy` in **Plugins → Add plugin**, or run:
 
 ```sh
 dsh plugin --profile web add deepinfra-fusion-proxy
@@ -115,7 +117,7 @@ distinct `stateDir` and `port` per profile to keep the instances independent.
 - **Lifecycle** — the core leaves with DSH even when DSH dies without stopping it (it watches a stdin pipe), so no orphan holds the port at the next start; a replacement instance (a hot swap, an update) waits for the old core to release the port; a core that keeps failing is retried five times with backoff and then stopped, with the reason on the page, until the next save.
 - **Layout** — everything is bundle-relative: the core is `<bundle>/server.js`, the state dir defaults to `$DSH_HOME/deepinfra-proxy` (`config.json` / `locks.json`), and both are overridable through this plugin's own Config. `config/cordis.patch.example.yml` shows the profile-layer form; you normally edit the page instead.
 - **Row id is load-bearing** — on DSH 0.1.7+ a plugin's settings namespace **is** its profile entry id, so the host row stays `deepinfra-proxy` (equal to the plugin name and to the legacy `settings.yaml` section, which the one-shot migration still imports).
-- **Compatibility gate** — `peerDependencies: { "@deepseek-ai/dsh": ">=0.2.2-alpha.2 <0.3.0" }` (plus a declarative `engines.dsh`). Version **2.2+** requires DSH 0.2.2-alpha.2 or later for native npm updates: `.volatile()` needs `@deepseek-ai/schemastery` ≥ 3.18.4 and the old client `settingsScope` service is gone, so there is no 0.1.6 branch.
+- **Compatibility gate** — `engines.dsh: ">=0.2.1-rc.2 <0.3.0"`. The plugins work on DSH 0.2.1; npm update-management UI availability does not set their runtime minimum.
 - **Point a route at it** — e.g. an `openai-completions` provider with `baseURL: http://127.0.0.1:8790/v1/openai` and `cacheRetention: long` (that is what supplies the per-session `prompt_cache_key`).
 
 ## Configuration

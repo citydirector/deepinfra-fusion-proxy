@@ -14,7 +14,7 @@ const path = require('path');
 const PORT = parseInt(process.env.MOCK_PORT || '8801', 10);
 // Debug scratch: write the last received body to the OS temp dir so this mock
 // never pollutes the permanent data directory on test runs.
-const LAST_REQ_FILE = path.join(os.tmpdir(), 'deepinfra-proxy-mock-last-request.json');
+const LAST_REQ_FILE = process.env.MOCK_LAST_REQ_FILE || path.join(os.tmpdir(), 'deepinfra-proxy-mock-last-request.json');
 let forcedStatus = 200;
 
 function readBody(req) {

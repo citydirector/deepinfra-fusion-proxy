@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /* Isolated regression test for the wait-policy feature (failfast vs wait).
- * Starts the mock upstream (8801) and a proxy instance (8791) pointed at it,
+ * Starts the mock upstream and a proxy instance on temporary loopback ports,
  * using a throwaway state dir so the live config.json/locks.json are untouched.
  */
 'use strict';
@@ -13,12 +13,12 @@ const path = require('path');
 // Project root (this file lives in test/). Resolved relative so the test runs
 // from any checkout location.
 const PROXY_DIR = path.join(__dirname, '..');
-const STATE_DIR = path.join(__dirname);
+const STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'deepinfra-wait-'));
 // Mock writes its debug scratch to the OS temp dir (never into data).
-const LAST_REQ_FILE = path.join(os.tmpdir(), 'deepinfra-proxy-mock-last-request.json');
-const MOCK_PORT = 8801;
-const PROXY_PORT = 8791;
-const UPSTREAM = `http://127.0.0.1:${MOCK_PORT}/v1/openai`;
+const LAST_REQ_FILE = path.join(STATE_DIR, 'last-request.json');
+let MOCK_PORT;
+let PROXY_PORT;
+const children = [];
 
 function req(method, port, p, body) {
   return new Promise((resolve, reject) => {
@@ -47,17 +47,44 @@ function check(name, cond, extra) {
   if (!cond) failures++;
 }
 
-async function waitPort(port, tries = 40) {
-  for (let i = 0; i < tries; i++) {
-    try {
-      await new Promise((res, rej) => {
-        const r = http.get({ host: '127.0.0.1', port, path: '/' }, (x) => { x.resume(); res(); });
-        r.on('error', rej);
-      });
-      return true;
-    } catch { await new Promise((r) => setTimeout(r, 100)); }
-  }
-  return false;
+async function freePort() {
+  const server = http.createServer();
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const port = server.address().port;
+  await new Promise(resolve => server.close(resolve));
+  return port;
+}
+
+async function start(script, env, ready) {
+  const child = spawn(process.execPath, [path.join(PROXY_DIR, script)], {
+    env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  children.push(child);
+  // Readiness must come from our child, never an arbitrary pre-existing server.
+  await new Promise((resolve, reject) => {
+    let output = '';
+    const timer = setTimeout(() => reject(new Error('Startup timeout: ' + output)), 5000);
+    const fail = error => { clearTimeout(timer); reject(error); };
+    child.once('error', fail);
+    child.once('exit', code => fail(new Error(script + ' exited before readiness: ' + code + '\n' + output)));
+    for (const stream of [child.stdout, child.stderr]) stream.on('data', data => {
+      output = (output + data).slice(-2000);
+      if (output.includes(ready)) { clearTimeout(timer); resolve(); }
+    });
+  });
+  return child;
+}
+
+async function cleanup() {
+  await Promise.all(children.map(child => new Promise(resolve => {
+    if (child.exitCode !== null || child.signalCode !== null) return resolve();
+    child.once('close', resolve);
+    child.kill();
+  })));
+  fs.rmSync(STATE_DIR, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
 function chatBody(key, extra) {
@@ -65,21 +92,13 @@ function chatBody(key, extra) {
 }
 
 async function main() {
-  // Clean state dir (fresh config/locks)
-  for (const f of ['config.json', 'locks.json']) {
-    const p = path.join(STATE_DIR, f);
-    if (fs.existsSync(p)) fs.unlinkSync(p);
-  }
-
-  const mock = spawn(process.execPath, [path.join(PROXY_DIR, 'test-mock-upstream.js')], { env: { ...process.env, MOCK_PORT: String(MOCK_PORT) }, stdio: 'inherit' });
-  const proxy = spawn(process.execPath, [path.join(PROXY_DIR, 'server.js')], {
-    env: { ...process.env, DF_PROXY_PORT: String(PROXY_PORT), DF_PROXY_UPSTREAM: UPSTREAM, DF_PROXY_BASE_PATH: '/v1/openai', DF_PROXY_STATE_DIR: STATE_DIR },
-    stdio: 'inherit',
-  });
-  process.on('exit', () => { mock.kill(); proxy.kill(); });
-
-  await waitPort(MOCK_PORT);
-  await waitPort(PROXY_PORT);
+  MOCK_PORT = await freePort();
+  await start('test-mock-upstream.js', { MOCK_PORT: String(MOCK_PORT), MOCK_LAST_REQ_FILE: LAST_REQ_FILE }, '[mock] listening');
+  PROXY_PORT = await freePort();
+  await start('server.js', {
+    DF_PROXY_PORT: String(PROXY_PORT), DF_PROXY_UPSTREAM: `http://127.0.0.1:${MOCK_PORT}/v1/openai`,
+    DF_PROXY_BASE_PATH: '/v1/openai', DF_PROXY_STATE_DIR: STATE_DIR,
+  }, '[deepinfra-proxy] listening');
   console.log('\n-- servers up --\n');
 
   // 1) flex + default failfast -> fail_fast true, service_tier flex
@@ -134,13 +153,8 @@ async function main() {
   check('null deletes waitMode key', st2.body && st2.body.waitModes && st2.body.waitModes['sess-a'] === undefined && st2.body.waitModes['sess-c'] === 'failfast', st2.body && st2.body.waitModes);
 
   console.log(`\n${failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)'}`);
-  mock.kill(); proxy.kill();
-  // Self-clean the throwaway state so the test dir stays pristine between runs.
-  for (const f of ['config.json', 'locks.json']) {
-    const p = path.join(STATE_DIR, f);
-    if (fs.existsSync(p)) { try { fs.unlinkSync(p); } catch (e) {} }
-  }
+  await cleanup();
   process.exit(failures === 0 ? 0 : 1);
 }
 
-main().catch((e) => { console.error(e); process.exit(2); });
+main().catch(async (e) => { console.error(e); await cleanup(); process.exit(2); });
