@@ -2,23 +2,11 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![Release](https://img.shields.io/github/v/tag/citydirector/deepinfra-fusion-proxy?sort=semver&label=release)](https://github.com/citydirector/deepinfra-fusion-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.1--rc.2-blue)](https://github.com/topics/dsh-plugin)
+[![npm](https://img.shields.io/npm/v/deepinfra-fusion-proxy)](https://www.npmjs.com/package/deepinfra-fusion-proxy) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.1--rc.2-blue)](https://github.com/topics/dsh-plugin)
 
 A dependency-free local reverse proxy for the [DeepInfra](https://deepinfra.com) API that turns the service-tier knobs into first-class switches and adds automatic `Standard ↔ Flex` fallback with per-session cooldown locks. It also ships as a **DSH (DeepSeek Harness) profile bundle** (DSH ≥ 0.2.1-rc.2), so a DSH install can add the proxy, its per-session toggle card *and* the bundle row's configuration page from npm.
 
-Requires **DSH 0.2.1-rc.2 or newer 0.2.x**.
-
-## npm installation and updates
-
-The plugin runs on DSH 0.2.1, including 0.2.1-rc.3. Use the Plugins page version list when your DSH provides it. Otherwise, stop DSH and run `dsh plugin --profile web add deepinfra-fusion-proxy@latest` (use `desktop` instead of `web` for Desktop), then restart. GitHub Actions publishing does not require an alpha DSH runtime.
-
-Requires DSH 0.2.1-rc.2 or a newer 0.2.x and Node.js 24.9+. Enter `deepinfra-fusion-proxy` in **Plugins → Add plugin**, or run:
-
-```sh
-dsh plugin --profile web add deepinfra-fusion-proxy
-```
-
-For an existing GitHub installation, back up the profile's `cordis.patch.yml`, remove the old package in Plugins, and add the npm package above in the same profile. Keep the configuration row IDs and verify the saved settings after reinstalling. Subsequent updates use DSH's version list and update operation. The plugin no longer polls GitHub or provides its own install/rollback buttons; an old `updateCheck` setting has no effect. DeepInfra runtime data stays at its existing path.
+Requires **DSH >=0.2.1-rc.2 <0.3.0** and **Node.js 24.9+**.
 
 ## Quick start
 
@@ -36,6 +24,8 @@ From the command line:
 dsh plugin --profile web add deepinfra-fusion-proxy
 ```
 
+Stop the corresponding DSH instance before CLI changes and restart afterwards. Prefer the Plugins page on Desktop; its desktop profile requires that installation’s CLI and the same DSH_HOME.
+
 Without DSH, run the proxy on its own (no install step, the core has no dependencies):
 
 ```bash
@@ -50,7 +40,7 @@ DeepInfra labels certain models with service tiers ([Chat Completions overview](
 
 | Parameter | Values | Semantics |
 |---|---|---|
-| `service_tier` | `"flex"` \| `"priority"` | `flex` = cheap, best-effort (queues when at capacity); `priority` = guaranteed capacity, pricier. The response echoes the effective tier back in `response.service_tier`. |
+| `service_tier` | `"flex"` \| `"priority"` | `flex` = cheap, best-effort (queues when at capacity); `priority` = prioritized scheduling on supported models, pricier. The response echoes the effective tier back in `response.service_tier`. |
 | `fail_fast` | `true` \| `false` | Default `false` (queue). When `true`, capacity problems return **HTTP 429** immediately instead of queuing. |
 
 `fail_fast: true` turns a capacity problem into a detectable `429`, and `service_tier` echoes let you know which tier you actually got. This proxy exploits exactly that to implement a fallback engine.
@@ -64,7 +54,7 @@ Most clients have no way to send these top-level fields, and switching between t
 - **Automatic fallback** — a `429` on a Flex attempt retries once as Standard, then either stays on Standard (`fallbackAction: "stay"`) or arms a per-session cooldown lock (`fallbackAction: "cooldown"`) that auto-returns to Flex after N rounds.
 - **Wait policy** — per session, choose **fail-fast** (`fail_fast: true`, busy → immediate 429 → fallback) or **wait** (`fail_fast: false`, busy → queue up to the provider cap, ~10 minutes on DeepInfra).
 - **Control API** — JSON endpoints for state, config, and unlocking cooldown locks, so a GUI or script can drive it live without a restart.
-- **DSH 0.1.7 configuration** — the host plugin declares its connection fields in its own Cordis `Config` (every field `.volatile()`), so on DSH 0.1.7+ the values live in the active profile's `cordis.patch.yml` and an edit restarts the supervised child in place instead of remounting the plugin. The bundle ships the row's configuration page (Plugins → `deepinfra-fusion-proxy` → `deepinfra-proxy` → 配置).
+- **DSH configuration** — the host plugin declares its connection fields in its own Cordis `Config` (every field `.volatile()`), so on DSH 0.1.7+ the values live in the active profile's `cordis.patch.yml` and an edit restarts the supervised child in place instead of remounting the plugin. The bundle ships the row's configuration page (Plugins → `deepinfra-fusion-proxy` → `deepinfra-proxy` → 配置).
 - **Zero dependencies in the core** — pure Node stdlib (`http`/`https`/`fs`/`path`), so `server.js` runs straight from a checkout with nothing to install. (The DSH host plugin beside it imports the harness' own `@deepseek-ai/schemastery`, declared as a dependency so a bundle install resolves it.)
 
 ## How it works
@@ -184,11 +174,17 @@ Point your client at `http://127.0.0.1:8790/v1/openai` and keep sending the norm
 
 ## Updating
 
-Use the DSH Plugins page to list npm versions and apply a compatible update. The plugin no longer checks GitHub or performs its own installation. See [PUBLISHING.md](PUBLISHING.md) for automatic publishing.
+Updates use npm and DSH’s installer. Use the Plugins page version list when your host provides it. Otherwise stop DSH and run:
+
+~~~sh
+dsh plugin --profile web add deepinfra-fusion-proxy@latest
+~~~
+
+The plugin’s GitHub polling and private update buttons have been removed; the old updateCheck setting has no effect. Maintainer publishing instructions are in [PUBLISHING.md](PUBLISHING.md).
 
 ## Upgrading from older versions
 
-Follow the npm migration instructions above. Keep the same profile and row IDs; DeepInfra heals old absolute module paths at startup.
+To migrate a GitHub dependency, back up the profile’s cordis.patch.yml, remove the old package and add deepinfra-fusion-proxy by its npm name. Keep row IDs and verify saved settings afterwards.
 
 ## Security
 
@@ -205,7 +201,7 @@ npm test    # or: node test/deepinfra-proxy-bundle-test.mjs && node test/run-wai
 `test/deepinfra-proxy-bundle-test.mjs` covers the bundle contract (no DSH, no network — except the localhost bridge it drives itself):
 
 - **package layout** — `dsh.bundle.patch` declared, the one package-named row, the dual-face root package (`"."` host plugin, `"./client"` browser half), the icon + `locale/{en,zh}.json` page metadata, and the host plugin anchoring on bundle-relative paths with no machine-specific absolute path baked in;
-- **the 0.1.7 settings contract** — the real schemastery `Config` parses into live `.get()` references with schema defaults, every field is `.volatile()`, the schema serializes for the form projection, and every field is editable in the browser half; plus static guards that the removed `ctx.settings.register` / `ctx.settings.get` / `settings/updated` APIs are gone;
+- **the Cordis settings contract** — the real schemastery `Config` parses into live `.get()` references with schema defaults, every field is `.volatile()`, the schema serializes for the form projection, and every field is editable in the browser half; plus static guards that the removed `ctx.settings.register` / `ctx.settings.get` / `settings/updated` APIs are gone;
 - **the live host contract** — a mocked DSH context (`webServer` route registration, `loader/volatile-update`, the optional page policy) around the real plugin, which spawns the real `server.js`; the harness drives the `/__dfusion/` bridge over HTTP and asserts that a volatile `enabled: false` commit stops the supervised child, `enabled: true` restarts it, and disposal stops it;
 - **2.1 fixes** — the core refuses control calls without the token, a client hang-up cancels the upstream request, the chat query string reaches upstream, the core exits when its parent's pipe closes, a busy port shows on the status route, a replacement instance waits for the old core's port, a stale pre-2.1 user-patch row is healed, and the release-tag logic picks and pins versions correctly.
 
