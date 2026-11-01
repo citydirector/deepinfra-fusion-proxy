@@ -1,6 +1,6 @@
 # deepinfra-fusion-proxy
 
-[English](README.md) · [简体中文](README.zh-CN.md)
+[English](README.md) · **简体中文**
 
 [![npm](https://img.shields.io/npm/v/deepinfra-fusion-proxy)](https://www.npmjs.com/package/deepinfra-fusion-proxy) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.1--rc.2-blue)](https://github.com/topics/dsh-plugin)
 
@@ -189,7 +189,7 @@ dsh plugin --profile web add deepinfra-fusion-proxy@latest
 - 内核只监听 `127.0.0.1`。在 DSH 里，控制 API 需要每次启动生成的 token；`/__dfusion/` 桥接先跑 DSH 自己的 Host/Origin 与登录校验（没有这个服务的部署里，只回应本机来源）。
 - 这些是传输层字段：注入的请求体 key 永远不会出现在模型可见文本里，因此"模型所见即所记"的不变式保持不变。
 
-## 开发与测试
+## 开发
 
 ```bash
 npm test    # 或：node test/deepinfra-proxy-bundle-test.mjs && node test/run-wait-test.js
@@ -221,9 +221,16 @@ pnpm install    # 读 pnpm-workspace.yaml：autoInstallPeers=false，@deepseek-a
 
 ## 相关项目
 
-- [dsh-remote-access-proxy](https://github.com/citydirector/dsh-remote-access-proxy)：在手机、平板或另一台电脑上使用 DSH
-- [dsh-loop-rescue](https://github.com/citydirector/dsh-loop-rescue)：模型复读时从流内切断、剪掉循环并自动续跑
-- [dsh-session-manager](https://github.com/citydirector/dsh-session-manager)：离线会话管理器，可升级、归档、清洗循环、修复烂尾会话
+[@citydirector](https://github.com/citydirector) 的其它 DeepSeek Harness（DSH）项目：
+
+| 项目 | 类型 | 用途 |
+|---|---|---|
+| [DSH-build](https://github.com/citydirector/DSH-build) | 构建 | DSH 的 Windows 便携版 / 桌面版绿色构建，每天跟随上游打补丁、冒烟、发布 |
+| [dsh-remote-access-proxy](https://github.com/citydirector/dsh-remote-access-proxy) | 插件 | 在手机、平板或其它电脑上用浏览器访问 DSH Web GUI |
+| [dsh-loop-rescue](https://github.com/citydirector/dsh-loop-rescue) | 插件 | 模型复读时从流内切断、剪掉循环并自动续跑 |
+| [dsh-pwsh-plugin](https://github.com/citydirector/dsh-pwsh-plugin) | 插件 | 常驻 pwsh 会话工具（`pwsh_run`），附带给 `bash` 补写边界的 WSL 垫片 |
+| [ui-locate-mcp](https://github.com/citydirector/ui-locate-mcp) | MCP 插件 | 按界面文字和图标给出精确像素坐标，用于桌面操作 |
+| [dsh-session-manager](https://github.com/citydirector/dsh-session-manager) | 离线工具 | 离线升级、归档、回收站、清洗循环、修复烂尾 / 隐藏会话 |
 
 ## 许可证
 

@@ -1,6 +1,6 @@
 # deepinfra-fusion-proxy
 
-[English](README.md) · [简体中文](README.zh-CN.md)
+**English** · [简体中文](README.zh-CN.md)
 
 [![npm](https://img.shields.io/npm/v/deepinfra-fusion-proxy)](https://www.npmjs.com/package/deepinfra-fusion-proxy) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.1--rc.2-blue)](https://github.com/topics/dsh-plugin)
 
@@ -224,9 +224,16 @@ pnpm install    # reads pnpm-workspace.yaml: autoInstallPeers=false keeps @deeps
 
 ## Related projects
 
-- [dsh-remote-access-proxy](https://github.com/citydirector/dsh-remote-access-proxy): Use DSH from your phone, tablet, or another computer
-- [dsh-loop-rescue](https://github.com/citydirector/dsh-loop-rescue): Cut model repetition loops mid-stream, prune them from the log, and resume
-- [dsh-session-manager](https://github.com/citydirector/dsh-session-manager): Offline session manager: upgrade, archive, trash, loop cleanup, broken-tail repair
+More DeepSeek Harness (DSH) projects from [@citydirector](https://github.com/citydirector):
+
+| Project | Kind | What it does |
+|---|---|---|
+| [DSH-build](https://github.com/citydirector/DSH-build) | Build | Portable and desktop Windows builds of DSH, patched, smoke-tested and released daily |
+| [dsh-remote-access-proxy](https://github.com/citydirector/dsh-remote-access-proxy) | Plugin | Use the DSH Web GUI from your phone, tablet, or another computer |
+| [dsh-loop-rescue](https://github.com/citydirector/dsh-loop-rescue) | Plugin | Cut model repetition loops mid-stream, prune them from the log, and resume |
+| [dsh-pwsh-plugin](https://github.com/citydirector/dsh-pwsh-plugin) | Plugin | Persistent pwsh session tool (`pwsh_run`), plus a WSL write boundary for `bash` |
+| [ui-locate-mcp](https://github.com/citydirector/ui-locate-mcp) | MCP plugin | Pixel-exact coordinates for on-screen text and icons, for desktop automation |
+| [dsh-session-manager](https://github.com/citydirector/dsh-session-manager) | Offline tool | Upgrade, archive, trash, loop cleanup and repair for DSH sessions |
 
 ## License
 
