@@ -4,3 +4,7 @@
 # compatibility gate; it must NOT be installed here, or a test run would drag
 # the whole harness tree into this checkout.
 autoInstallPeers: false
+
+# Keep the schema dependency graph stable for profiles that link this checkout.
+overrides:
+  "@deepseek-ai/schemastery>@deepseek-ai/cosmokit": 1.8.5

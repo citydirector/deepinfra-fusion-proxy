@@ -14,6 +14,10 @@
  * cooldown locks are naturally per-session without any client change.
  * Unknown/absent keys fall back to the global `defaultMode`.
  *
+ * Behind a gateway (magpie on this machine) the body arrives without
+ * `prompt_cache_key`; keyOf() then reads a session header, a body session id,
+ * or the conversation's opening turn, so "per session" survives the relay.
+ *
  * State files (JSON) live beside this script:
  *   config.json  -> { defaultMode, coolLockRounds, sessions: { [key]: mode },
  *                     fallbackAction, defaultWait, waitModes: { [key]: wait } }
@@ -151,10 +155,57 @@ function mutateConfig(fn) {
   return run;
 }
 
-function keyOf(body) {
-  return body && typeof body.prompt_cache_key === 'string' && body.prompt_cache_key
-    ? body.prompt_cache_key
-    : 'default';
+/** Headers a caller may carry the conversation in when it has no prompt_cache_key. */
+const SESSION_HEADERS = ['x-dfusion-session', 'x-session-id', 'x-session_id', 'x-conversation-id', 'x-conversation_id'];
+
+/** FNV-1a, 32-bit: a stable, tiny fingerprint with no crypto dependency. */
+function fnv1a(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/** The opening turn of a conversation: identical for every request in one chat. */
+function conversationSeed(body) {
+  const messages = body && Array.isArray(body.messages) ? body.messages : undefined;
+  if (!messages || messages.length === 0) return '';
+  const first = messages.find((m) => m && m.role === 'user') || messages[0];
+  const content = first && (typeof first.content === 'string' ? first.content : JSON.stringify(first.content ?? ''));
+  if (!content) return '';
+  return 'conv-' + fnv1a(String(body.model || '') + '\u0000' + content.slice(0, 512));
+}
+
+/**
+ * The per-session key. DSH with `cacheRetention: long` sends `prompt_cache_key`
+ * (the raw sessionId). A gateway in front of this proxy — magpie runs one on
+ * this machine — may forward the body without it, so the ladder below keeps
+ * per-session routing there too instead of collapsing every conversation into
+ * `default`:
+ *   1. prompt_cache_key           (DSH talking to us directly)
+ *   2. an explicit session header (magpie's own, or any client that sends one)
+ *   3. a session/user id in the body (`session_id`, `metadata.session_id`, `user`)
+ *   4. the conversation's opening turn (one key per chat)
+ *   5. `default`
+ */
+function keyOf(body, headers) {
+  if (body && typeof body.prompt_cache_key === 'string' && body.prompt_cache_key) return body.prompt_cache_key;
+  const list = headers || {};
+  for (const header of SESSION_HEADERS) {
+    const value = list[header];
+    if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 64);
+  }
+  const candidates = [body && body.session_id, body && body.metadata && body.metadata.session_id, body && body.user];
+  for (const value of candidates) {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed && trimmed.length <= 64) return trimmed;
+    }
+  }
+  const seed = conversationSeed(body);
+  return seed || 'default';
 }
 function bodyForMode(base, mode, wait) {
   const b = { ...base };
@@ -331,7 +382,7 @@ function handleControl(req, res, url) {
 async function injectAndForward(req, res, url) {
   let body;
   try { body = JSON.parse((await readBody(req)).toString('utf8')); } catch { return sendJson(res, 400, { error: 'bad json' }); }
-  const key = keyOf(body);
+  const key = keyOf(body, req.headers);
   const cfg = loadConfig();
   // The caller (DSH) cancels a turn by closing the connection. Abort the
   // upstream request with it; piping alone leaves the upstream generation (and

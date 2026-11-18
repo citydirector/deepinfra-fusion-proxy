@@ -1,7 +1,7 @@
 {
   "name": "deepinfra-fusion-proxy",
-  "version": "2.2.2",
-  "description": "Local reverse proxy for the DeepInfra API (injects service_tier/fail_fast, falls back between Standard and Flex with per-session cooldown locks), shipped as a DSH profile bundle with a per-session composer toggle, a status-first configuration page.",
+  "version": "2.3.2",
+  "description": "Local reverse proxy for the DeepInfra API (injects service_tier/fail_fast, falls back between Standard and Flex with per-session cooldown locks), shipped as a DSH profile bundle with a per-session composer toggle and a page in DSH's own Settings dialog; works behind magpie's gateway.",
   "type": "commonjs",
   "main": "plugin/deepinfra-proxy.mjs",
   "icon": "icon.svg",
@@ -24,8 +24,7 @@
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-session",
-        "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-slots"
+        "@deepseek-ai/dsh-client-ui-settings"
       ],
       "platform": "web"
     }
@@ -47,7 +46,7 @@
   ],
   "scripts": {
     "start": "node server.js",
-    "test": "node test/deepinfra-proxy-bundle-test.mjs && node test/run-wait-test.js && node --test test/compatibility.spec.mjs"
+    "test": "node test/deepinfra-proxy-bundle-test.mjs && node test/run-wait-test.js && node --test test/compatibility.spec.mjs test/session-key.spec.mjs test/client-settings-slot.spec.mjs"
   },
   "engines": {
     "node": ">=24.9.0",
@@ -71,7 +70,7 @@
     "deepseek-harness"
   ],
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.4"
+    "@deepseek-ai/schemastery": "3.18.4"
   },
   "license": "MIT",
   "repository": {

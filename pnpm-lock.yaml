@@ -4,13 +4,20 @@ settings:
   autoInstallPeers: false
   excludeLinksFromLockfile: false
 
+overrides:
+  '@deepseek-ai/schemastery>@deepseek-ai/cosmokit': 1.8.5
+
 importers:
 
   .:
     dependencies:
       '@deepseek-ai/schemastery':
-        specifier: ^3.18.4
+        specifier: 3.18.4
         version: 3.18.4
+    devDependencies:
+      semver:
+        specifier: ^7.8.5
+        version: 7.8.5
 
 packages:
 
@@ -23,6 +30,11 @@ packages:
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
+  semver@7.8.5:
+    resolution: {integrity: sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==}
+    engines: {node: '>=10'}
+    hasBin: true
+
 snapshots:
 
   '@deepseek-ai/cosmokit@1.8.5': {}
@@ -33,3 +45,5 @@ snapshots:
       '@standard-schema/spec': 1.1.0
 
   '@standard-schema/spec@1.1.0': {}
+
+  semver@7.8.5: {}

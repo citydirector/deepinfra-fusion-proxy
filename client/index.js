@@ -4,10 +4,11 @@
  *  1. the per-session Standard/Flex chip in the composer tool row
  *     (`conversation.input.right`), which drives the proxy core's runtime
  *     state through the host's `/__dfusion/` bridge; and
- *  2. the bundle row's configuration page (`plugins.row.config`, keyed
- *     `<package>#<row id>`): a status card first — is the core running, why
- *     not, the baseURL to give llm-pi-ai, the version — then
- *     the host plugin's live Config over the shared `configForms` service.
+ *  2. the plugin's page in DSH's own Settings dialog (`settings.section`,
+ *     id `deepinfra-fusion`): a status card first — is the core running, why
+ *     not, the baseURL to give llm-pi-ai, whether magpie's DeepInfra route
+ *     goes through us, the version — then the host plugin's live Config over
+ *     the shared `configForms` service.
  *
  * Effective mode for the current session:
  *   cooldown lock active            -> "standard" (until lock expires or unlocked)
@@ -411,18 +412,16 @@ window.__ModuleLoader__.load({
       );
     }
 
-    // ---- bundle row configuration page --------------------------------------
+    // ---- settings page (DSH Settings dialog -> sidebar) ----------------------
     /** Settings namespace — the host row's profile entry id, not a separate registration. */
     const NS = "deepinfra-proxy";
-    /** Bundle package that declares the row; a row page is keyed `<package>#<row id>`. */
-    const BUNDLE = "deepinfra-fusion-proxy";
-    const ROW_KEY = BUNDLE + "#" + NS;
     /** Host status route, relative to the page's `<base href>` so it also works behind a proxy. */
     const STATUS_URL = "api/deepinfra-proxy/status";
     const POLL_MS = 3000;
 
     const COPY = {
       zh: {
+        nav: "DeepInfra",
         summary: "为 llm-pi-ai 的 deepinfra 路由注入 service_tier / fail_fast，并按会话在 Standard 与 Flex 间自动回退",
         running: "运行中",
         starting: "启动中…",
@@ -436,6 +435,11 @@ window.__ModuleLoader__.load({
         copy: "复制",
         copied: "已复制",
         recent: "最近输出",
+        magpie: {
+          viaProxy: "magpie 的 DeepInfra 通道经本代理（agent → magpie → 本代理 → DeepInfra）",
+          direct: "magpie 的 DeepInfra 通道仍直连：{url}。在 magpie 里把它改成上面的 baseURL，档位才会覆盖这条通道",
+          none: "magpie 已安装，但没有配置 DeepInfra 通道",
+        },
         reasons: {
           "port-in-use": "端口 {port} 已被占用：换一个端口，或关掉占用它的程序（另一个 DSH，或上次没退干净的代理）",
           "server-missing": "找不到代理内核 server.js：{error}。「内核路径」留空即可使用插件自带的内核",
@@ -475,6 +479,11 @@ window.__ModuleLoader__.load({
         copy: "Copy",
         copied: "Copied",
         recent: "Recent output",
+        magpie: {
+          viaProxy: "magpie's DeepInfra route goes through this proxy (agent → magpie → proxy → DeepInfra)",
+          direct: "magpie's DeepInfra route still goes direct: {url}. Point it at the baseURL above so tiers cover that route",
+          none: "magpie is installed but has no DeepInfra provider",
+        },
         reasons: {
           "port-in-use": "Port {port} is already in use: pick another port, or close what holds it (another DSH, or a proxy left over from an unclean exit)",
           "server-missing": "The proxy core server.js was not found: {error}. Leave Core path empty to use the one the plugin ships",
@@ -577,7 +586,9 @@ window.__ModuleLoader__.load({
     }
 
     const S = {
-      panel: { display: "flex", flexDirection: "column", gap: 10, padding: 16, marginBottom: 24, borderRadius: 12, border: "0.5px solid var(--dsw-alias-border-l3)", background: "var(--dsw-alias-bg-layer-1)" },
+      section: { display: "flex", flexDirection: "column", gap: 16, minWidth: 0 },
+      title: { margin: 0, fontSize: 16, fontWeight: 600, lineHeight: "24px", color: "var(--dsw-alias-label-primary)" },
+      panel: { display: "flex", flexDirection: "column", gap: 10, padding: 16, borderRadius: 12, border: "0.5px solid var(--dsw-alias-border-l3)", background: "var(--dsw-alias-bg-layer-1)" },
       statusLine: { display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 500, color: "var(--dsw-alias-label-primary)" },
       reason: { margin: 0, fontSize: 13, lineHeight: "20px", color: "var(--dsw-alias-state-error-primary)", overflowWrap: "anywhere" },
       label: { margin: "6px 0 0", fontSize: 12, fontWeight: 500, color: "var(--dsw-alias-label-secondary)" },
@@ -640,6 +651,12 @@ window.__ModuleLoader__.load({
         children.push(h(CopyLine, { key: "url", text: status.baseURL, t }));
       }
       if (status?.version) children.push(h("p", { key: "version", style: S.note }, "v" + status.version));
+      const magpie = status?.magpie;
+      if (magpie && magpie.found) {
+        if (magpie.viaProxy) children.push(h("p", { key: "magpie", style: S.ok }, t.magpie.viaProxy));
+        else if (magpie.deepinfra) children.push(h("p", { key: "magpie", style: S.warn }, t.magpie.direct.replace("{url}", String(magpie.deepinfra))));
+        else children.push(h("p", { key: "magpie", style: S.note }, t.magpie.none));
+      }
       return h("section", { style: S.panel, "data-dip-status": state }, children);
     }
 
@@ -680,10 +697,9 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /** The page: a one-liner for the row list; status, version and the form on its own page. */
-    function DeepInfraProxyCard(props) {
+    /** The page: the live status, then the form over the host Config. */
+    function DeepInfraProxySection(props) {
       const t = copy();
-      if (props.view === "summary") return t.summary;
       const state = props.useDipCard((snapshot) => snapshot);
       // Re-read the status right after a save lands (the core restarts in place).
       const status = useProxyStatus(state.saving ? 1 : 0);
@@ -706,7 +722,8 @@ window.__ModuleLoader__.load({
       });
       return h(
         "div",
-        null,
+        { style: S.section, "data-dip-settings": "page" },
+        h("h3", { style: S.title }, t.nav),
         h(StatusPanel, { status, t }),
         h(SettingsForm, { labels: t.form, state, onSave: props.save, onDiscard: props.discard }, fields),
       );
@@ -714,30 +731,55 @@ window.__ModuleLoader__.load({
 
     const inject = ["slots", "configForms"];
 
+    // Client halves fail silently in production: a throw inside apply() leaves the
+    // composer chip and the settings page both missing, with nothing in the UI to
+    // show why. Each registration is therefore isolated, and every failure is
+    // announced on the console under one greppable prefix.
+    function report(stage, error) {
+      const message = error instanceof Error ? error.message : String(error);
+      globalThis.console?.error?.("deepinfra-fusion-proxy: " + stage + " failed — " + message);
+    }
+
     function apply(ctx) {
       // 1) the live per-session Standard/Flex chip, in the composer tool row.
-      ctx.slots.inject("conversation.input.right", () =>
-        ctx.slots.register(
-          { name: "conversation.input.right", id: "deepinfra-fusion-toggle", order: 50, label: "DeepInfra" },
-          (props) => react.createElement(FusionChip, { sessionId: props.sessionId }),
-        ),
-      );
-
-      // 2) the bundle row's configuration page, while the Host serves the namespace.
-      const card = new DeepInfraProxyCardController(ctx.configForms.get(NS));
-      ctx.effect(() => () => card.dispose(), "deepinfra-fusion-proxy: form subscription");
-      ctx.effect(
-        () =>
-          ctx.configForms.whileServed([NS], () =>
-            ctx.slots.inject("plugins.row.config", () =>
-              ctx.slots.register(
-                { name: "plugins.row.config", key: ROW_KEY, inject: () => card.inject() },
-                DeepInfraProxyCard,
-              ),
-            ),
+      try {
+        ctx.slots.inject("conversation.input.right", () =>
+          ctx.slots.register(
+            { name: "conversation.input.right", id: "deepinfra-fusion-toggle", order: 50, label: "DeepInfra" },
+            (props) => react.createElement(FusionChip, { sessionId: props.sessionId }),
           ),
-        "deepinfra-fusion-proxy: configuration page",
-      );
+        );
+      } catch (error) {
+        report("composer chip", error);
+      }
+
+      // 2) the page in DSH's Settings dialog, while the Host serves the namespace.
+      try {
+        const card = new DeepInfraProxyCardController(ctx.configForms.get(NS));
+        ctx.effect(() => () => card.dispose(), "deepinfra-fusion-proxy: form subscription");
+        ctx.effect(
+          () =>
+            ctx.configForms.whileServed([NS], () => {
+              globalThis.console?.info?.("deepinfra-fusion-proxy: settings namespace served");
+              return ctx.slots.inject("settings.section", () =>
+                ctx.slots.register(
+                  {
+                    name: "settings.section",
+                    id: "deepinfra-fusion",
+                    order: 60,
+                    label: () => copy().nav,
+                    locale: NS,
+                    inject: () => card.inject(),
+                  },
+                  DeepInfraProxySection,
+                ),
+              );
+            }),
+          "deepinfra-fusion-proxy: settings page",
+        );
+      } catch (error) {
+        report("settings page", error);
+      }
     }
 
     exports.apply = apply;

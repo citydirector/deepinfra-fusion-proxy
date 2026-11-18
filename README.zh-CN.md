@@ -4,7 +4,7 @@
 
 [![npm](https://img.shields.io/npm/v/deepinfra-fusion-proxy)](https://www.npmjs.com/package/deepinfra-fusion-proxy) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.1--rc.2-blue)](https://github.com/topics/dsh-plugin)
 
-一个零依赖的 [DeepInfra](https://deepinfra.com) API 本地反向代理：把服务档位（service tier）参数变成开箱即用的开关，并实现自动 `Standard ↔ Flex` 回退与按会话的冷却锁。同时以 **DSH（DeepSeek Harness）profile bundle** 形式发布（需 DSH ≥ 0.2.1-rc.2），DSH 可从 npm 一次装好代理、按会话切换卡片与 bundle 行的配置页。
+一个零依赖的 [DeepInfra](https://deepinfra.com) API 本地反向代理：把服务档位（service tier）参数变成开箱即用的开关，并实现自动 `Standard ↔ Flex` 回退与按会话的冷却锁。同时以 **DSH（DeepSeek Harness）profile bundle** 形式发布（需 DSH ≥ 0.2.1-rc.2），DSH 可从 npm 一次装好代理、按会话切换卡片，以及它自己那一页设置界面。
 
 DSH 插件需要 **DSH >=0.2.1-rc.2 <0.3.0** 与 **Node.js 24.9+**；直接运行 server.js 的独立代理需要 Node.js 18+。
 
@@ -54,7 +54,7 @@ DeepInfra 会给部分模型标注服务档位（参考 [Chat Completions 概览
 - **自动回退** — Flex 尝试遇到 `429` 后，以 Standard 重试一次，然后要么停在 Standard（`fallbackAction: "stay"`），要么挂上按会话的冷却锁（`fallbackAction: "cooldown"`），N 轮后自动回到 Flex。
 - **等待策略** — 按会话选择 **立即失败**（`fail_fast: true`，忙时立刻 429 → 回退）或 **排队等待**（`fail_fast: false`，忙时入队，DeepInfra 上限约 10 分钟）。
 - **控制 API** — 提供状态 / 配置 / 解锁冷却锁的 JSON 端点，GUI 或脚本可免重启实时驱动。
-- **DSH 0.1.7 配置模型** — 宿主插件用自己的 Cordis `Config` 声明连接字段（全部 `.volatile()`），因此在 0.1.7+ 上这些值落在活动 profile 的 `cordis.patch.yml` 里，改动是**原地重启**被监管的子进程，而不是重挂插件。bundle 同时提供该行的配置页（插件页 → `deepinfra-fusion-proxy` → `deepinfra-proxy` → 配置）。
+- **DSH 0.1.7 配置模型** — 宿主插件用自己的 Cordis `Config` 声明连接字段（全部 `.volatile()`），因此在 0.1.7+ 上这些值落在活动 profile 的 `cordis.patch.yml` 里，改动是**原地重启**被监管的子进程，而不是重挂插件。bundle 同时提供一页 DSH 自己的设置界面（设置 → DeepInfra）。
 - **内核零依赖** — 仅用 Node 标准库（`http`/`https`/`fs`/`path`），`server.js` 从检出目录直接就能跑、无需安装。（它旁边的 DSH 宿主插件会 import 宿主自带的 `@deepseek-ai/schemastery`，已声明为依赖，bundle 安装时由 pnpm 解析。）
 
 ## 工作原理
@@ -84,7 +84,7 @@ bundle 插入的内容（`cordis.patch.yml`，一行，按 id 定位——用户
 ```yaml
 - insert:
     - id: deepinfra-proxy
-      name: deepinfra-fusion-proxy   # 包本身："." = 宿主插件，"./client" = 切换卡片 + 配置页
+      name: deepinfra-fusion-proxy   # 包本身："." = 宿主插件，"./client" = 切换卡片 + 设置页
 ```
 
 这一行写的是**包名**而不是 `./` 路径：DSH 会把相对路径解析成绝对 file URL，配置编辑器第一次保存时
@@ -98,13 +98,14 @@ bundle 插入的内容（`cordis.patch.yml`，一行，按 id 定位——用户
 共用同一个 `$DSH_HOME` 的两个 profile（便携版与桌面端指向同一个 `data` 目录）都会默认使用
 `$DSH_HOME/deepinfra-proxy` 作为状态目录。给每个 profile 设不同的 `stateDir` 与 `port` 即可互不影响。
 
-- **宿主插件** — 随 DSH 启停代理内核、异常退出按退避重启、卸载时释放端口，并注册卡片所用的同源 `/__dfusion/*` → `/__proxy/*` 桥接。
+- **宿主插件** — 随 DSH 启停代理内核、异常退出按退避重启、卸载时释放端口，并注册卡片所用的同源 `/__dfusion/*` → `/__proxy/*` 桥接。自 2.3.1 起这条路由声明 `auth: "required"`：DSH 先认证，再把已准入的 peer 交给处理函数，只有仍然存活的 owner peer 才会被转发；宿主完全不传 peer 时（没有组合 Web 应用），才退回 Host/Origin 来源栅栏，且只回应同源本机调用。
 - **切换卡片** — 会话输入区工具行（`conversation.input.right`）的 chip，弹出面板可切 Standard/Flex、等待策略、冷却轮数与 429 回退方式。它驱动代理自身的 `config.json`，重启 DSH 仍保留，且不需要改任何随包发布的代码。
-- **配置页** — 同一个浏览器半边还在插件页注册了该 bundle 行的配置页（`plugins.row.config`，key = `deepinfra-fusion-proxy#deepinfra-proxy`）。最上面是状态卡，读自带鉴权的 `api/deepinfra-proxy/status` 路由：内核是否在运行、没运行的原因（端口被占、找不到内核、意外退出，附最近输出）、给 llm-pi-ai 填的 baseURL、当前版本。下面是走共享 `configForms` 服务的宿主 Config：`enabled`、`port`、`upstream`、`stateDir`、`serverPath`。这些是**连接字段**，与上面那个运行时档位刻意分开。
+- **设置页** — 同一个浏览器半边把页面注册进 DSH 自己的设置界面（`settings.section`，id `deepinfra-fusion`，标签 `DeepInfra`，order 60）——与内置页和其它第三方插件同一个槽位，所以它出现在设置对话框侧栏里。最上面是状态卡，读自带鉴权的 `api/deepinfra-proxy/status` 路由：内核是否在运行、没运行的原因（端口被占、找不到内核、意外退出，附最近输出）、给 llm-pi-ai 填的 baseURL、当前版本。下面是走共享 `configForms` 服务的宿主 Config：`enabled`、`port`、`upstream`、`stateDir`、`serverPath`。这些是**连接字段**，与上面那个运行时档位刻意分开。
+- **跟在 magpie 后面** — magpie 自己也有一条 `deepinfra` provider。把它指到本代理（`magpie provider set deepinfra url=http://127.0.0.1:8791/v1/openai`），经 magpie 进来的请求也能拿到同样的档位注入，magpie 自己的用量统计照常。网关转发时不会带上 `prompt_cache_key`，所以内核按「会话头 → 请求体里的 session id → 这段对话的第一轮」逐层兜底取键，按会话的路由与冷却锁在转发后依然成立。设置页会显示 magpie 的 DeepInfra 通道当前指向哪里；它只读 magpie 的文件，从不写。
 - **生命周期** — DSH 没来得及停它就挂了，内核也会跟着退出（它盯着一条 stdin 管道），下次启动不会被孤儿进程占住端口；替换实例（热替换、更新）会等旧内核放开端口；内核反复失败时按退避重试 5 次后停下，原因显示在配置页，下次保存再重新启动。
 - **目录约定** — 全部相对 bundle：内核是 `<bundle>/server.js`，状态目录默认 `$DSH_HOME/deepinfra-proxy`（`config.json` / `locks.json`），二者都可在插件自己的 Config 里覆盖。`config/cordis.patch.example.yml` 给出 profile 层的写法；通常你直接在配置页改就行。
 - **行 id 是承重的** — 0.1.7+ 里插件的设置命名空间**就是**它的 profile entry id，所以宿主行保持 `deepinfra-proxy`（与插件名、与旧 `settings.yaml` 段名三者同名，一次性迁移仍能导入）。
-- **兼容门禁** — `engines.dsh: ">=0.2.1-rc.2 <0.3.0"`。插件支持 DSH 0.2.1；npm 更新管理界面是否可用，不决定插件的最低运行版本。
+- **兼容门禁** — `engines.dsh: ">=0.2.1-rc.2 <0.3.0"`。插件支持 DSH 0.2.1；npm 更新管理界面是否可用，不决定插件的最低运行版本。2.3.1 是针对 DSH 0.2.2-rc.3 的适配：那一版把 `register({ auth })` 定为准入契约，桥接因此改为接收内核给出的 `peer`，不再自己问一个更弱的问题。忽略 `auth` 的旧宿主仍然走来源栅栏。
 - **把路由指过来** — 例如一个 `openai-completions` provider，`baseURL: http://127.0.0.1:8790/v1/openai` 且 `cacheRetention: long`（按会话的 `prompt_cache_key` 正是由此而来）。
 
 ## 配置
@@ -183,10 +184,16 @@ dsh plugin --profile web add deepinfra-fusion-proxy@latest
 
 从 GitHub 来源迁移到 npm 时，先备份 profile 的 cordis.patch.yml，移除旧包后以 deepinfra-fusion-proxy 重新添加。保留原行 ID，安装后检查已保存的配置。
 
+2.3.0 → 2.3.1 不需要改任何配置：它只是把桥接重新注册到 DSH 自己的准入 API（0.2.2-rc.3 起），并对不传 peer 的宿主保留来源栅栏兜底。
+
+2.3.1 → 2.3.2 同样不需要改配置：去掉了 `dsh.client.inject` 里在 0.2.2-rc.3 中并不存在的 `@deepseek-ai/dsh-client-ui-slots`，并让客户端两处注册（输入区 chip、设置页）各自 try/catch、失败时在控制台以 `deepinfra-fusion-proxy:` 前缀报出具体阶段——此前任一处抛错都会让两处界面一起消失且不留痕迹。
+
+> 在 DSH 0.2.2-rc.3 上，使用 npm 2.2.2 的 profile 请升级到 2.3.2，以恢复 DeepInfra 设置页。开发用的本地链接应在 DSH 运行期间保留锁定的依赖版本。
+
 ## 安全
 
 - 代理原样透传 `Authorization` 头，不保存任何凭据——请在客户端/宿主里用环境变量读取 API key。
-- 内核只监听 `127.0.0.1`。在 DSH 里，控制 API 需要每次启动生成的 token；`/__dfusion/` 桥接先跑 DSH 自己的 Host/Origin 与登录校验（没有这个服务的部署里，只回应本机来源）。
+- 内核只监听 `127.0.0.1`。在 DSH 里，控制 API 需要每次启动生成的 token。`/__dfusion/` 桥接不是第二道闸，而是把准入交给内核：它声明 `auth: "required"`，登录校验由 DSH 完成，处理函数拿到的是内核已准入的 peer——没有 peer 或 peer 已撤销是 401，peer 不在 owner 范围是 403，被拒的请求根本到不了转发逻辑。只有宿主完全不传 peer（未组合 Web 应用）时才退回 Host/Origin 来源栅栏，且那只放行同源本机调用：地址看起来是本机，不等于身份。
 - 这些是传输层字段：注入的请求体 key 永远不会出现在模型可见文本里，因此"模型所见即所记"的不变式保持不变。
 
 ## 开发

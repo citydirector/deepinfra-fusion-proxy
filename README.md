@@ -4,7 +4,7 @@
 
 [![npm](https://img.shields.io/npm/v/deepinfra-fusion-proxy)](https://www.npmjs.com/package/deepinfra-fusion-proxy) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.1--rc.2-blue)](https://github.com/topics/dsh-plugin)
 
-A dependency-free local reverse proxy for the [DeepInfra](https://deepinfra.com) API that turns the service-tier knobs into first-class switches and adds automatic `Standard ↔ Flex` fallback with per-session cooldown locks. It also ships as a **DSH (DeepSeek Harness) profile bundle** (DSH ≥ 0.2.1-rc.2), so a DSH install can add the proxy, its per-session toggle card *and* the bundle row's configuration page from npm.
+A dependency-free local reverse proxy for the [DeepInfra](https://deepinfra.com) API that turns the service-tier knobs into first-class switches and adds automatic `Standard ↔ Flex` fallback with per-session cooldown locks. It also ships as a **DSH (DeepSeek Harness) profile bundle** (DSH ≥ 0.2.1-rc.2), so a DSH install can add the proxy, its per-session toggle card *and* its own page in DSH's Settings dialog from npm.
 
 Requires **DSH >=0.2.1-rc.2 <0.3.0** and **Node.js 24.9+**.
 
@@ -54,7 +54,7 @@ Most clients have no way to send these top-level fields, and switching between t
 - **Automatic fallback** — a `429` on a Flex attempt retries once as Standard, then either stays on Standard (`fallbackAction: "stay"`) or arms a per-session cooldown lock (`fallbackAction: "cooldown"`) that auto-returns to Flex after N rounds.
 - **Wait policy** — per session, choose **fail-fast** (`fail_fast: true`, busy → immediate 429 → fallback) or **wait** (`fail_fast: false`, busy → queue up to the provider cap, ~10 minutes on DeepInfra).
 - **Control API** — JSON endpoints for state, config, and unlocking cooldown locks, so a GUI or script can drive it live without a restart.
-- **DSH configuration** — the host plugin declares its connection fields in its own Cordis `Config` (every field `.volatile()`), so on DSH 0.1.7+ the values live in the active profile's `cordis.patch.yml` and an edit restarts the supervised child in place instead of remounting the plugin. The bundle ships the row's configuration page (Plugins → `deepinfra-fusion-proxy` → `deepinfra-proxy` → 配置).
+- **DSH configuration** — the host plugin declares its connection fields in its own Cordis `Config` (every field `.volatile()`), so on DSH 0.1.7+ the values live in the active profile's `cordis.patch.yml` and an edit restarts the supervised child in place instead of remounting the plugin. The bundle ships a page in DSH's own Settings dialog (Settings → DeepInfra).
 - **Zero dependencies in the core** — pure Node stdlib (`http`/`https`/`fs`/`path`), so `server.js` runs straight from a checkout with nothing to install. (The DSH host plugin beside it imports the harness' own `@deepseek-ai/schemastery`, declared as a dependency so a bundle install resolves it.)
 
 ## How it works
@@ -84,7 +84,7 @@ What the bundle inserts (`cordis.patch.yml`, one id-addressed row — a user-lay
 ```yaml
 - insert:
     - id: deepinfra-proxy
-      name: deepinfra-fusion-proxy   # the package: "." = host plugin, "./client" = chip + configuration page
+      name: deepinfra-fusion-proxy   # the package: "." = host plugin, "./client" = chip + settings page
 ```
 
 The row names the **package**, not a `./` path: DSH turns a relative name into an absolute file URL,
@@ -101,13 +101,14 @@ Two profiles that share one `$DSH_HOME` (the portable and desktop apps pointed a
 directory) both default to `$DSH_HOME/deepinfra-proxy` and share that state directory. Set a
 distinct `stateDir` and `port` per profile to keep the instances independent.
 
-- **Host plugin** — starts/stops the proxy core with DSH, restarts it with backoff, releases the port on unload, and registers the same-origin `/__dfusion/*` → `/__proxy/*` bridge the card talks through.
+- **Host plugin** — starts/stops the proxy core with DSH, restarts it with backoff, releases the port on unload, and registers the same-origin `/__dfusion/*` → `/__proxy/*` bridge the card talks through. Since 2.3.1 that route declares `auth: "required"`, so DSH authenticates the caller before the handler runs and hands it the admitted peer; the handler forwards only for an owner peer that is still alive. On a host that passes no peer at all, it falls back to the Host/Origin fence and answers same-origin loopback callers only.
 - **Toggle card** — a chip in the composer tool row (`conversation.input.right`) with a popover for Standard/Flex, wait policy, cooldown rounds and fallback behaviour. It drives the proxy's own `config.json`, so it survives a DSH restart and needs no shipped-code change.
-- **Configuration page** — the same browser half registers the bundle row's page on the Plugins page (`plugins.row.config`, keyed `deepinfra-fusion-proxy#deepinfra-proxy`). It opens with a status card read from the authenticated `api/deepinfra-proxy/status` route: whether the core runs and, if not, why (a busy port, a missing core, a crash, with its last output), the baseURL to give llm-pi-ai, and the version. Below it, the host Config over the shared `configForms` service: `enabled`, `port`, `upstream`, `stateDir`, `serverPath`. Those are connection fields and are deliberately *not* the same thing as the runtime mode above.
+- **Settings page** — the same browser half registers its page on DSH's own Settings dialog (`settings.section`, id `deepinfra-fusion`, label `DeepInfra`, order 60), the same slot the built-in pages and other third-party plugins use, so it appears in the dialog's sidebar next to theirs. It opens with a status card read from the authenticated `api/deepinfra-proxy/status` route: whether the core runs and, if not, why (a busy port, a missing core, a crash, with its last output), the baseURL to give llm-pi-ai, and the version. Below it, the host Config over the shared `configForms` service: `enabled`, `port`, `upstream`, `stateDir`, `serverPath`. Those are connection fields and are deliberately *not* the same thing as the runtime mode above.
+- **Behind magpie** — [magpie](https://magpie.sh) keeps its own `deepinfra` provider. Point it at this proxy (`magpie provider set deepinfra url=http://127.0.0.1:8791/v1/openai`) and the requests that arrive through magpie get the same tier injection, while magpie keeps its own usage accounting. A gateway forwards the body without `prompt_cache_key`, so the core keys a session by a session header, a body session id, or the conversation's opening turn — per-session routing and cooldown locks survive the relay. The settings page shows which way magpie's DeepInfra route currently points; it only ever reads magpie's file, never writes it.
 - **Lifecycle** — the core leaves with DSH even when DSH dies without stopping it (it watches a stdin pipe), so no orphan holds the port at the next start; a replacement instance (a hot swap, an update) waits for the old core to release the port; a core that keeps failing is retried five times with backoff and then stopped, with the reason on the page, until the next save.
 - **Layout** — everything is bundle-relative: the core is `<bundle>/server.js`, the state dir defaults to `$DSH_HOME/deepinfra-proxy` (`config.json` / `locks.json`), and both are overridable through this plugin's own Config. `config/cordis.patch.example.yml` shows the profile-layer form; you normally edit the page instead.
 - **Row id is load-bearing** — on DSH 0.1.7+ a plugin's settings namespace **is** its profile entry id, so the host row stays `deepinfra-proxy` (equal to the plugin name and to the legacy `settings.yaml` section, which the one-shot migration still imports).
-- **Compatibility gate** — `engines.dsh: ">=0.2.1-rc.2 <0.3.0"`. The plugins work on DSH 0.2.1; npm update-management UI availability does not set their runtime minimum.
+- **Compatibility gate** — `engines.dsh: ">=0.2.1-rc.2 <0.3.0"`. The plugins work on DSH 0.2.1; npm update-management UI availability does not set their runtime minimum. 2.3.1 is the adapter for DSH 0.2.2-rc.3, where `register({ auth })` became the admission contract: the bridge now takes the kernel's `peer` instead of asking a weaker question of its own. Hosts that ignore `auth` still get the source fence.
 - **Point a route at it** — e.g. an `openai-completions` provider with `baseURL: http://127.0.0.1:8790/v1/openai` and `cacheRetention: long` (that is what supplies the per-session `prompt_cache_key`).
 
 ## Configuration
@@ -186,10 +187,16 @@ The plugin’s GitHub polling and private update buttons have been removed; the 
 
 To migrate a GitHub dependency, back up the profile’s cordis.patch.yml, remove the old package and add deepinfra-fusion-proxy by its npm name. Keep row IDs and verify saved settings afterwards.
 
+2.3.0 → 2.3.1 changes no configuration: it re-registers the bridge on DSH's own admission API (0.2.2-rc.3 and newer) and keeps the source-fence fallback for hosts that pass no peer.
+
+2.3.1 → 2.3.2 also changes no configuration: it drops `@deepseek-ai/dsh-client-ui-slots` from `dsh.client.inject` (that package does not exist in 0.2.2-rc.3) and isolates the two client registrations — the composer chip and the settings page — so a failure in one is reported on the console under the `deepinfra-fusion-proxy:` prefix instead of silently taking both down.
+
+> Profiles on npm 2.2.2 should upgrade to 2.3.2 on DSH 0.2.2-rc.3 to restore the DeepInfra settings page. For a locally linked development checkout, keep the locked dependency versions while DSH is running.
+
 ## Security
 
 - The proxy relays the `Authorization` header verbatim; it stores no credentials — read the API key from an env var in your client/host.
-- The core binds to `127.0.0.1` only. Under DSH its control API needs the per-start token; the `/__dfusion/` bridge runs DSH's own Host/Origin and login check first (or, in a deployment without that service, answers loopback callers only).
+- The core binds to `127.0.0.1` only. Under DSH its control API needs the per-start token. The `/__dfusion/` bridge is not a second gate: it declares `auth: "required"`, so DSH does the login check and the handler receives the peer it admitted — a missing or revoked peer is refused with 401, a peer outside the owner scope with 403, and a rejected caller never reaches the forwarder. Only a host that passes no peer (no web app composed) falls back to the Host/Origin fence, and that fallback admits same-origin loopback callers only — a socket that merely looks local is not an identity.
 - These are transport-level fields: injected request-body keys are never part of the model-visible text, so the "what the model sees is what gets logged" invariant is preserved.
 
 ## Development

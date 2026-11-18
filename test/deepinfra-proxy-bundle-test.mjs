@@ -280,9 +280,13 @@ async function main() {
   check("client bundle keeps the composer chip on its live slot", clientSource.includes("conversation.input.right") && clientSource.includes("deepinfra-fusion-toggle"));
   check("client bundle talks to the host bridge", clientSource.includes(`${BRIDGE_PREFIX}/state`) && clientSource.includes(`${BRIDGE_PREFIX}/config`) && clientSource.includes(`${BRIDGE_PREFIX}/unlock`));
   check(
-    "client bundle registers the bundle row configuration page on the 0.1.7 slots",
-    clientSource.includes('"plugins.row.config"') && clientSource.includes('BUNDLE + "#" + NS') && clientSource.includes(`"${BUNDLE}"`) && clientSource.includes(`"${ROW_ID}"`),
+    "client bundle registers its page on DSH's Settings sidebar",
+    clientSource.includes('"settings.section"') &&
+      clientSource.includes('id: "deepinfra-fusion"') &&
+      clientSource.includes("DeepInfraProxySection") &&
+      clientSource.includes("label: () => copy().nav"),
   );
+  check("client bundle no longer claims the bundle row's config page", !clientSource.includes('"plugins.row.config"') && !clientSource.includes("ROW_KEY"));
   check("client bundle reads the shared configForms service", clientSource.includes("configForms") && clientSource.includes("whileServed"));
   let clientParses = clientSource !== "";
   try {
@@ -311,9 +315,19 @@ async function main() {
     "a webServer provided after mount was missed for the life of the instance",
   );
   check(
-    "the bridge runs DSH's request gate before forwarding",
-    pluginSource.includes('ctx.get("connection")') && pluginSource.includes("requestRejection"),
+    "the bridge route declares auth: \"required\" instead of asking the webServer to skip it",
+    /webServer\.register\(\{[^}]*\bpath:\s*BRIDGE_PREFIX\s*,[^}]*\bauth:\s*"required"\s*,[^}]*\bhandler:\s*bridgeHandler\s*,?\s*\}\)/.test(pluginSource),
     "an ungated prefix route is an unauthenticated read/write endpoint for the runtime config",
+  );
+  check(
+    "the bridge takes the kernel-authenticated peer as its admission answer",
+    pluginSource.includes("function bridgeHandler(req, res, peer)") && pluginSource.includes("assessBridge(req, peer)"),
+    "the handler must receive the peer the kernel admitted, not re-ask a weaker question",
+  );
+  check(
+    "no fallback admits a request just because its socket looks local",
+    !/\b(?:requestRejection|isLoopback)\s*\(/.test(pluginSource),
+    "a socket address is a source, not an identity",
   );
   check("plugin needs schemastery", pluginSource.includes('from "@deepseek-ai/schemastery"'));
   check("plugin no longer registers a settings namespace the old way", !pluginSource.includes("ctx.settings.register") && !pluginSource.includes("ctx.settings.get"));
@@ -395,20 +409,45 @@ async function main() {
   check("registers the /__dfusion prefix route on the webserver", route !== undefined && route.kind === "prefix" && typeof route.handler === "function", JSON.stringify(ctx._routes.map((r) => ({ kind: r.kind, path: r.path }))));
 
   // Serve the registered bridge handler so the harness can drive it over HTTP.
-  const bridge = http.createServer((req, res) => route.handler(req, res));
+  // `kernelPeer` is what admission hands a gated route's handler: the kernel has
+  // already answered "who is this" by the time the route runs.
+  let kernelPeer = { principal: { kind: "owner" }, signal: { aborted: false } };
+  const bridge = http.createServer((req, res) => route.handler(req, res, kernelPeer));
   await new Promise((r) => bridge.listen(bridgePort, "127.0.0.1", r));
 
-  // A webserver route is not gated by the web server, so the bridge itself has
-  // to run the Host/Origin + browser-session gate before it forwards anything.
-  ctx._setRejection(401);
-  const denied = await httpReq(bridgePort, { path: `${BRIDGE_PREFIX}/state` });
-  check("the bridge refuses a request DSH would reject", denied.status === 401, `status=${denied.status}`);
-  ctx._setRejection(403);
-  const fenced = await httpReq(bridgePort, { path: `${BRIDGE_PREFIX}/state` });
-  check("the bridge propagates the Host/Origin fence rejection", fenced.status === 403, `status=${fenced.status}`);
-  ctx._setRejection(undefined);
+  check("the registered route asks the kernel for authentication", route.auth === "required", JSON.stringify({ auth: route.auth }));
+
   const admitted = await httpReq(bridgePort, { path: `${BRIDGE_PREFIX}/state` });
-  check("the bridge admits a request DSH would accept", admitted.status !== 401 && admitted.status !== 403, `status=${admitted.status}`);
+  check("an authenticated owner peer reaches the control endpoint", admitted.status !== 401 && admitted.status !== 403, `status=${admitted.status}`);
+
+  kernelPeer = { principal: { kind: "owner" }, signal: { aborted: true } };
+  const revoked = await httpReq(bridgePort, { path: `${BRIDGE_PREFIX}/state` });
+  check("a revoked peer is refused (401), not forwarded", revoked.status === 401, `status=${revoked.status}`);
+
+  kernelPeer = { principal: { kind: "guest" }, signal: { aborted: false } };
+  const foreign = await httpReq(bridgePort, { path: `${BRIDGE_PREFIX}/state` });
+  check("a peer outside the owner scope is refused (403)", foreign.status === 403, `status=${foreign.status}`);
+  kernelPeer = { principal: { kind: "owner" }, signal: { aborted: false } };
+
+  // A host that ignores `auth` passes no peer. The source fence is then the only
+  // evidence available, and it must still refuse everything it cannot prove.
+  const legacyPort = await freePort();
+  const legacy = http.createServer((req, res) => route.handler(req, res));
+  await new Promise((r) => legacy.listen(legacyPort, "127.0.0.1", r));
+
+  const legacyOk = await httpReq(legacyPort, { path: `${BRIDGE_PREFIX}/state`, headers: { host: `127.0.0.1:${legacyPort}`, origin: `http://127.0.0.1:${legacyPort}` } });
+  check("a host that passes no peer still admits same-origin loopback callers", legacyOk.status !== 401 && legacyOk.status !== 403, `status=${legacyOk.status}`);
+
+  const rebind = await httpReq(legacyPort, { path: `${BRIDGE_PREFIX}/state`, headers: { host: "evil.example.com" } });
+  check("the source fence refuses a foreign Host (DNS rebinding)", rebind.status === 403, `status=${rebind.status}`);
+
+  const crossSite = await httpReq(legacyPort, { path: `${BRIDGE_PREFIX}/state`, headers: { host: `127.0.0.1:${legacyPort}`, "sec-fetch-site": "cross-site" } });
+  check("the source fence refuses a cross-site request", crossSite.status === 403, `status=${crossSite.status}`);
+
+  const crossOrigin = await httpReq(legacyPort, { path: `${BRIDGE_PREFIX}/state`, headers: { host: `127.0.0.1:${legacyPort}`, origin: "http://evil.example.com" } });
+  check("the source fence refuses an Origin that is not the Host", crossOrigin.status === 403, `status=${crossOrigin.status}`);
+
+  await new Promise((r) => legacy.close(r));
 
   async function bridgeState(tries = 60) {
     let last = { status: "timeout", body: undefined };
@@ -487,8 +526,9 @@ async function main() {
   check("the bootstrap harness leaves no runtime state behind", !existsSync(absentDir) && !existsSync(stubKernel));
 
   // ── E. the bridge gate is optional ───────────────────────────────────────
-  // A deployment that composes no web app has no `connection` service to gate
-  // with; the bridge must still register and forward rather than hard-fail.
+  // A deployment that composes no web app passes no peer at all. The bridge must
+  // still register, and must fall back to the source fence rather than hard-fail —
+  // a socket that looks local is the only evidence such a host can offer.
   console.log("\n-- E. bridge without the connection service --");
   const openDir = join(tmpdir(), `deepinfra-fusion-proxy-open-${process.pid}-${Date.now()}`);
   rmSync(openDir, { recursive: true, force: true });
@@ -511,7 +551,7 @@ async function main() {
     openRes = await httpReq(openPort, { path: `${BRIDGE_PREFIX}/state` });
     if (openRes.status !== 200) await sleep(100);
   }
-  check("without a connection service the bridge still serves loopback callers", openRes.status === 200, `status=${openRes.status}`);
+  check("without a peer the source fence still serves loopback callers", openRes.status === 200, `status=${openRes.status}`);
   await new Promise((r) => openServer.close(r));
   openCtx._disposeAll();
   await sleep(250);
